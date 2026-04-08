@@ -132,7 +132,11 @@ async def run_harness(workspace_root: Path | str) -> ParityHarnessReport:
         ParityCaseResult(
             name="observable_help_surface",
             passed="`yt!stop` / `/ytstop` - Shut the bot down gracefully"
-            in snapshot["observable_surfaces"]["help_pages"][1]["fields"][0]["value"],
+            in "\n".join(
+                field["value"]
+                for field in snapshot["observable_surfaces"]["help_pages"][1]["fields"]
+                if field["name"].startswith("Admin Commands")
+            ),
             details="help page snapshot",
         ),
         ParityCaseResult(name="snapshot_written", passed=snapshot_path.exists(), details=str(snapshot_path)),

@@ -192,7 +192,8 @@ def _schedule_delete(target: str, after_seconds: int) -> CommandEvent:
 
 def _cleanup_prefix_invocation_events(ctx: CommandContext) -> list[CommandEvent]:
     if not ctx.is_interaction and not ctx.is_admin_channel():
-        return [_delete("invocation")]
+        timeout = ctx.runtime.config.discord.transient_message_timeout_seconds
+        return [_schedule_delete("invocation", timeout)]
     return []
 
 

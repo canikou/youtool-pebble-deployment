@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from yt_assist.domain.backup import load_export
 from yt_assist.domain.catalog import Catalog
 from yt_assist.domain.models import (
     AccountingPolicy,
@@ -93,11 +95,14 @@ class SanitizePreview:
     non_active_proof_paths_retained: int = 0
     orphaned_proof_files: int = 0
     stale_import_files: int = 0
+    duplicate_proof_groups: int = 0
+    duplicate_proof_files: int = 0
     sample_renames: list[str] = field(default_factory=list)
     sample_prunable_receipts: list[str] = field(default_factory=list)
     sample_retained_receipts: list[str] = field(default_factory=list)
     sample_orphan_files: list[str] = field(default_factory=list)
     sample_stale_import_files: list[str] = field(default_factory=list)
+    sample_duplicate_groups: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -797,6 +802,66 @@ class Database:
         await self._connection.commit()
         return True
 
+    async def update_receipt_items(
+        self,
+        receipt_id: str,
+        items: list[PricedItem],
+        *,
+        total_sale: int,
+        procurement_cost: int,
+        profit: int,
+        actor: AuditEventInput,
+    ) -> bool:
+        await self._connection.execute("BEGIN")
+        try:
+            cursor = await self._connection.execute(
+                """
+                UPDATE receipts
+                SET total_sale = ?, procurement_cost = ?, profit = ?
+                WHERE id = ?
+                """,
+                (total_sale, procurement_cost, profit, receipt_id),
+            )
+            if cursor.rowcount == 0:
+                await self._connection.rollback()
+                return False
+
+            await self._connection.execute(
+                "DELETE FROM receipt_items WHERE receipt_id = ?",
+                (receipt_id,),
+            )
+            for item in items:
+                await self._connection.execute(
+                    """
+                    INSERT INTO receipt_items (
+                        receipt_id,
+                        item_name,
+                        quantity,
+                        unit_sale_price,
+                        unit_cost,
+                        pricing_source,
+                        line_sale_total,
+                        line_cost_total
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        item.item_name,
+                        item.quantity,
+                        item.unit_sale_price,
+                        item.unit_cost,
+                        item.pricing_source.as_str(),
+                        item.line_sale_total,
+                        item.line_cost_total,
+                    ),
+                )
+            await self._insert_audit_event(actor)
+            await self._connection.commit()
+            return True
+        except Exception:
+            await self._connection.rollback()
+            raise
+
     async def export_bundle(self, catalog: Catalog) -> ExportBundle:
         async with self._connection.execute(
             "SELECT id FROM receipts ORDER BY finalized_at ASC"
@@ -1189,11 +1254,13 @@ class Database:
         self,
         attachment_dir: Path,
         export_dir: Path,
+        import_dir: Path | None = None,
         protected_import_paths: set[Path] | None = None,
     ) -> SanitizePreview:
         plan = await self._build_sanitize_plan(
             attachment_dir,
             export_dir,
+            import_dir=import_dir,
             protected_import_paths=protected_import_paths,
         )
         return plan.preview
@@ -1202,11 +1269,13 @@ class Database:
         self,
         attachment_dir: Path,
         export_dir: Path,
+        import_dir: Path | None = None,
         protected_import_paths: set[Path] | None = None,
     ) -> SanitizeReport:
         plan = await self._build_sanitize_plan(
             attachment_dir,
             export_dir,
+            import_dir=import_dir,
             protected_import_paths=protected_import_paths,
         )
         report = SanitizeReport(preview=plan.preview)
@@ -1280,10 +1349,12 @@ class Database:
         self,
         attachment_dir: Path,
         export_dir: Path,
+        import_dir: Path | None = None,
         protected_import_paths: set[Path] | None = None,
     ) -> _SanitizePlan:
         attachment_root = attachment_dir.resolve()
         export_root = export_dir.resolve()
+        import_root = import_dir.resolve() if import_dir is not None and import_dir.exists() else None
         protected_import_paths = {
             path.resolve()
             for path in (protected_import_paths or set())
@@ -1396,6 +1467,15 @@ class Database:
                 if len(preview.sample_orphan_files) < 5:
                     preview.sample_orphan_files.append(path.name)
 
+            duplicate_groups = _collect_duplicate_file_groups(attachment_root)
+            preview.duplicate_proof_groups = len(duplicate_groups)
+            preview.duplicate_proof_files = sum(len(group) - 1 for group in duplicate_groups)
+            for group in duplicate_groups[:5]:
+                preview.sample_duplicate_groups.append(
+                    ", ".join(f"`{path.name}`" for path in group[:3])
+                    + (f" (+{len(group) - 3} more)" if len(group) > 3 else "")
+                )
+
         if export_root.exists():
             for path in sorted(export_root.glob("upload-import-*.json"), key=lambda item: item.name.lower()):
                 if not path.is_file():
@@ -1407,6 +1487,26 @@ class Database:
                 preview.stale_import_files += 1
                 if len(preview.sample_stale_import_files) < 5:
                     preview.sample_stale_import_files.append(path.name)
+
+        if import_root is not None:
+            for path in sorted(import_root.glob("*.json"), key=lambda item: item.name.lower()):
+                if not path.is_file():
+                    continue
+                resolved = path.resolve()
+                if resolved in protected_import_paths:
+                    continue
+                try:
+                    bundle = load_export(path)
+                    preview_result = await self.inspect_import_bundle(bundle, None)
+                except Exception:
+                    continue
+                if preview_result.importable_receipts > 0:
+                    continue
+                if path not in plan.stale_import_files:
+                    plan.stale_import_files.append(resolved)
+                    preview.stale_import_files += 1
+                    if len(preview.sample_stale_import_files) < 5:
+                        preview.sample_stale_import_files.append(path.name)
 
         plan.prunable_files = sorted(prunable_file_set, key=lambda item: str(item).lower())
         return plan
@@ -1687,6 +1787,29 @@ def _path_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _collect_duplicate_file_groups(root: Path) -> list[list[Path]]:
+    hashes: dict[str, list[Path]] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: str(item).lower()):
+        if not path.is_file():
+            continue
+        digest = _file_sha256(path)
+        if digest is None:
+            continue
+        hashes.setdefault(digest, []).append(path.resolve())
+    return [group for group in hashes.values() if len(group) > 1]
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except OSError:
+        return None
 
 
 async def _unlink_path(path: Path) -> bool:

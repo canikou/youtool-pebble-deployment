@@ -122,9 +122,13 @@ class ReplyPayload:
     embeds: list[EmbedPayload] = field(default_factory=list)
     components: list[ActionRowPayload] = field(default_factory=list)
     ephemeral: bool = False
+    suppress_mentions: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"ephemeral": self.ephemeral}
+        payload: dict[str, Any] = {
+            "ephemeral": self.ephemeral,
+            "suppress_mentions": self.suppress_mentions,
+        }
         if self.content is not None:
             payload["content"] = self.content
         if self.embeds:
@@ -279,6 +283,34 @@ def _help_page_title(page: int) -> str:
     return "Workflow Tips"
 
 
+def _add_wrapped_field(
+    embed: EmbedPayload,
+    title: str,
+    lines: list[str],
+    *,
+    limit: int = 1024,
+) -> EmbedPayload:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        added_length = len(line) + (1 if current else 0)
+        if current and current_length + added_length > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_length = len(line)
+            continue
+        current.append(line)
+        current_length += added_length
+    if current:
+        chunks.append("\n".join(current))
+    if not chunks:
+        chunks = ["-"]
+    for index, chunk in enumerate(chunks):
+        embed.field(title if index == 0 else f"{title} (cont.)", chunk, False)
+    return embed
+
+
 def help_page_embed(prefix: str, page: int) -> EmbedPayload:
     page = _clamp_help_page(page)
     embed = panel_embed(
@@ -286,55 +318,46 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
         f"Use `{prefix}[command]` or the matching slash command.",
     )
     if page == 0:
-        embed.field(
+        _add_wrapped_field(
+            embed,
             "Everyday Commands",
-            (
-                f"`{prefix}calc [@user] [items...]` / `/ytcalc [user] [items]` - Open the calculator panel; "
-                "admins can credit a receipt to someone else and freeform items like `3 shovel 2 gloves` prefill the receipt\n"
-                f"`{prefix}stats` / `/ytstats` - Show the leaderboard for 1 minute\n"
-                f"`{prefix}pricesheet` / `/ytpricesheet` - Show the current catalog price sheet\n"
-                f"`{prefix}contracts` / `/ytcontracts` - Show configured contract pricing\n"
-                f"`{prefix}procurementfunds <amount> [@user]` / `/ytprocurementfunds` - Record a procurement-funds withdrawal\n"
-                f"`{prefix}padd <amount> [@user]` - Short alias for procurement-funds withdrawal\n"
-                f"`{prefix}procurementreturn <amount> [@user]` / `/ytprocurementreturn` - Record unused company funds returned\n"
-                f"`{prefix}preturn <amount> [@user]` - Short alias for procurement return\n"
-                f"`{prefix}procurementbalance [@user]` / `/ytprocurementbalance` - Show remaining company procurement funds\n"
-                f"`{prefix}pbal [@user]` - Short alias for procurement balance\n"
-                f"`{prefix}help` / `/ythelp` - Open this paged help panel\n"
-                f"`{prefix}health` / `/ythealth` - Check bot setup and permissions"
-            ),
-            False,
-        ).field(
-            "Where To Use Them",
-            "Use these in the main channel for everyday receipt work.",
-            False,
-        )
+            [
+                f"`{prefix}calc [@user] [items...]` / `/ytcalc [user] [items]` - Open the calculator panel; admins can credit a receipt to someone else and freeform items like `3 shovel 2 gloves` prefill the receipt",
+                f"`{prefix}stats` / `/ytstats` - Show the leaderboard for 1 minute",
+                f"`{prefix}pricesheet` / `/ytpricesheet` - Show the current catalog price sheet",
+                f"`{prefix}contracts` / `/ytcontracts` - Show configured contract pricing",
+                f"`{prefix}procurementfunds <amount> [@user]` / `/ytprocurementfunds` - Record a procurement-funds withdrawal",
+                f"`{prefix}padd <amount> [@user]` - Short alias for procurement-funds withdrawal",
+                f"`{prefix}procurementreturn <amount> [@user]` / `/ytprocurementreturn` - Record unused company funds returned",
+                f"`{prefix}preturn <amount> [@user]` - Short alias for procurement return",
+                f"`{prefix}procurementbalance [@user]` / `/ytprocurementbalance` - Show remaining company procurement funds",
+                f"`{prefix}pbal [@user]` - Short alias for procurement balance",
+                f"`{prefix}help` / `/ythelp` - Open this paged help panel",
+                f"`{prefix}health` / `/ythealth` - Check bot setup and permissions",
+            ],
+        ).field("Where To Use Them", "Use these in the main channel for everyday receipt work.", False)
     elif page == 1:
-        embed.field(
+        _add_wrapped_field(
+            embed,
             "Admin Commands",
-            (
-                f"`{prefix}manage` / `/ytmanage` - Open the receipt manager\n"
-                f"`{prefix}payouts` / `/ytpayouts` - Show employee payout totals with procurement-balance adjustments\n"
-                f"`{prefix}refresh` / `/ytrefresh` - Reload catalog and contract files from disk\n"
-                f"`{prefix}adjustprices` / `/ytadjustprices` - Edit the live catalog and refresh it\n"
-                f"`{prefix}procurementcutover` / `/ytprocurementcutover` - Switch new receipts to procurement-funds accounting\n"
-                f"`{prefix}templates [reload]` / `/yttemplates [reload]` - Show live announcement commands or reload the templates JSON\n"
-                f"`{prefix}rescan <message-link-or-id>` / `/ytrescan` - Scan the main channel for undocumented receipts after a message and review them one by one\n"
-                f"`{prefix}contracts add` / `/ytcontracts add` - Add or update a contract preset\n"
-                f"`{prefix}reset` / `/ytreset` - Backup active receipts, then mark them paid or invalidate them\n"
-                f"`{prefix}export` / `/ytexport` - Export the current database as JSON\n"
-                f"`{prefix}import [file] [mode]` / `/ytimport` - Upload an export or load one from `/import`, review the preview, then confirm import\n"
-                f"`{prefix}sanitize` / `/ytsanitize` - Preview safe proof/file cleanup, create a backup export, then apply it\n"
-                f"`{prefix}rebuildlogs` / `/ytrebuildlogs` - Rebuild the receipt log channel from the database\n"
-                f"`{prefix}restartbot` / `/ytrestartbot` - Restart the bot remotely\n"
-                f"`{prefix}stop` / `/ytstop` - Shut the bot down gracefully"
-            ),
-            False,
-        ).field(
-            "Where To Use Them",
-            "Use these in the admin channel for corrections, payouts, imports, exports, and maintenance.",
-            False,
-        )
+            [
+                f"`{prefix}manage` / `/ytmanage` - Open the receipt manager",
+                f"`{prefix}payouts` / `/ytpayouts` - Show employee payout totals with procurement-balance adjustments",
+                f"`{prefix}refresh` / `/ytrefresh` - Reload catalog and contract files from disk",
+                f"`{prefix}adjustprices` / `/ytadjustprices` - Edit the live catalog and refresh it",
+                f"`{prefix}procurementcutover` / `/ytprocurementcutover` - Switch new receipts to procurement-funds accounting",
+                f"`{prefix}templates [reload]` / `/yttemplates [reload]` - Show live announcement commands or reload the templates JSON",
+                f"`{prefix}rescan <message-link-or-id>` / `/ytrescan` - Scan the main channel for undocumented receipts after a message and review them one by one",
+                f"`{prefix}contracts add` / `/ytcontracts add` - Add or update a contract preset",
+                f"`{prefix}reset` / `/ytreset` - Backup active receipts, then mark them paid or invalidate them",
+                f"`{prefix}export` / `/ytexport` - Export the current database as JSON",
+                f"`{prefix}import [file] [mode]` / `/ytimport` - Upload an export or load one from `/import`, review the preview, then confirm import",
+                f"`{prefix}sanitize` / `/ytsanitize` - Preview safe proof/file cleanup, create a backup export, then apply it",
+                f"`{prefix}rebuildlogs` / `/ytrebuildlogs` - Rebuild the receipt log channel from the database",
+                f"`{prefix}restartbot` / `/ytrestartbot` - Restart the bot remotely",
+                f"`{prefix}stop` / `/ytstop` - Shut the bot down gracefully",
+            ],
+        ).field("Where To Use Them", "Use these in the admin channel for corrections, payouts, imports, exports, and maintenance.", False)
     elif page == 2:
         embed.field(
             "Main Channel Receipt Cards",
@@ -350,19 +373,19 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             False,
         )
     else:
-        embed.field(
+        _add_wrapped_field(
+            embed,
             "Workflow Tips",
-            (
-                f"Attach one or more images to `{prefix}calc` to preload proof on prefix usage.\n"
-                f"You can also prefill items with freeform text such as `{prefix}calc 3 shovel 2 gloves 1 bucket`.\n"
-                "Quantity defaults to `1` when you add an item manually.\n"
-                f"Use `{prefix}calc @user` if you are an admin recording a receipt on someone else's behalf.\n"
-                f"Use `{prefix}procurementbalance @user` or `{prefix}pbal @user` to see whether company procurement funds are still available or personal spending has begun.\n"
-                f"Use `{prefix}rescan <message-link-or-id>` to review unregistered receipt candidates after downtime.\n"
-                f"Use `{prefix}import paid` or `{prefix}import invalidated` to override imported receipt statuses after reviewing the preview.\n"
-                f"Use `{prefix}sanitize` after heavy export/import churn to normalize proof filenames and delete safe leftovers."
-            ),
-            False,
+            [
+                f"Attach one or more images to `{prefix}calc` to preload proof on prefix usage.",
+                f"You can also prefill items with freeform text such as `{prefix}calc 3 shovel 2 gloves 1 bucket`.",
+                "Quantity defaults to `1` when you add an item manually.",
+                f"Use `{prefix}calc @user` if you are an admin recording a receipt on someone else's behalf.",
+                f"Use `{prefix}procurementbalance @user` or `{prefix}pbal @user` to see whether company procurement funds are still available or personal spending has begun.",
+                f"Use `{prefix}rescan <message-link-or-id>` to review unregistered receipt candidates after downtime.",
+                f"Use `{prefix}import paid` or `{prefix}import invalidated` to override imported receipt statuses after reviewing the preview.",
+                f"Use `{prefix}sanitize` after heavy export/import churn to normalize proof filenames and delete safe leftovers.",
+            ],
         ).field(
             "Permissions",
             "Everyone: `calc`, `stats`, `pricesheet`, `contracts`, `procurementfunds`, `padd`, `procurementreturn`, `preturn`, `procurementbalance`, `pbal`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `adjustprices`, `procurementcutover`, `templates`, `rescan`, `contracts add`, `reset`, `export`, `import`, `sanitize`, `rebuildlogs`, `restartbot`, `stop`",
@@ -856,18 +879,25 @@ def receipt_detail_payload(
         payment_proof_field_value(receipt.payment_proof_source_url),
         False,
     ).with_footer(
-        "Active receipts affect payouts. Paid receipts stay in stats only. Invalidated receipts are excluded. Replace Proof keeps the receipt ID."
+        "Active receipts affect payouts. Paid receipts stay in stats only. Invalidated receipts are excluded. Edit Items and Replace Proof keep the receipt ID."
     )
     apply_receipt_display_context(base_embed, display)
 
     buttons = [
+        ButtonPayload(
+            custom_id=f"receipt|items|{owner_user_id}|{receipt.id}",
+            label="Edit Items",
+            style=BUTTON_STYLE_SECONDARY,
+        )
+    ]
+    buttons.extend(
         ButtonPayload(
             custom_id=f"receipt|detail_status|{owner_user_id}|{receipt.id}|{action[0]}",
             label=action[1],
             style=action[2],
         )
         for action in admin_receipt_actions(receipt.status)
-    ]
+    )
     buttons.append(
         ButtonPayload(
             custom_id=f"receipt|proof|{owner_user_id}|{receipt.id}",
@@ -924,6 +954,7 @@ def receipt_log_payload(
         embeds=[embed, *proof_preview_embeds(receipt.payment_proof_source_url, "Payment Proof")],
         components=[ActionRowPayload(components=receipt_log_action_buttons(receipt.id, receipt.creator_user_id, receipt.status))],
         ephemeral=False,
+        suppress_mentions=True,
     )
 
 

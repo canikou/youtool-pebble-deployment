@@ -41,7 +41,6 @@ from yt_assist.storage.database import (
     ImportPreview,
     ImportReport,
     SanitizePreview,
-    SanitizeReport,
 )
 
 from .commands import (
@@ -53,7 +52,13 @@ from .commands import (
     execute_input,
     handle_component_click,
 )
-from .command_support import parse_add_item_inputs, parse_calc_prefix_input, parse_prefill_items, parse_user_token
+from .command_support import (
+    parse_add_item_inputs,
+    parse_calc_prefix_input,
+    parse_prefill_items,
+    parse_receipt_item_editor_input,
+    parse_user_token,
+)
 from .render import (
     ActionRowPayload,
     BUTTON_STYLE_DANGER,
@@ -84,6 +89,12 @@ from .render import (
     task_error_embed,
     task_status_embed,
     task_warning_embed,
+)
+from .sanitize_support import (
+    sanitize_completed_message,
+    sanitize_confirmation_message,
+    sanitize_noop_message,
+    sanitize_preview_has_actions,
 )
 from .state import CalculatorSession, SessionCreditTarget, new_receipt_id
 
@@ -124,6 +135,7 @@ class DiscordReplySpec:
     embeds: list[discord.Embed]
     view: discord.ui.View | None
     ephemeral: bool
+    allowed_mentions: discord.AllowedMentions | None
 
     def send_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -133,14 +145,19 @@ class DiscordReplySpec:
             kwargs["embeds"] = self.embeds
         if self.view is not None:
             kwargs["view"] = self.view
+        if self.allowed_mentions is not None:
+            kwargs["allowed_mentions"] = self.allowed_mentions
         return kwargs
 
     def edit_kwargs(self) -> dict[str, Any]:
-        return {
+        kwargs: dict[str, Any] = {
             "content": self.content,
             "embeds": self.embeds,
             "view": self.view,
         }
+        if self.allowed_mentions is not None:
+            kwargs["allowed_mentions"] = self.allowed_mentions
+        return kwargs
 
 
 @dataclass(slots=True)
@@ -756,6 +773,7 @@ def reply_payload_to_spec(
         embeds=[embed_from_payload(embed) for embed in payload.embeds],
         view=view_from_payload(client, runtime, payload),
         ephemeral=payload.ephemeral,
+        allowed_mentions=discord.AllowedMentions.none() if payload.suppress_mentions else None,
     )
 
 
@@ -1652,8 +1670,7 @@ class YTAssistDiscordClient(discord.Client):
                 dispatch.reply_message.channel.id,
                 dispatch.reply_message.id,
             )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     def _resolve_calc_credit_target(
         self,
@@ -2166,6 +2183,30 @@ class YTAssistDiscordClient(discord.Client):
             spec = reply_payload_to_spec(self, self.shared_runtime, payload)
             await interaction.response.send_message(**spec.send_kwargs(), ephemeral=True)
             return
+        if action == "items" and len(parts) >= 4:
+            owner_id = int(parts[2])
+            receipt_id = parts[3]
+            if owner_id != interaction.user.id:
+                await interaction.response.send_message("This receipt panel belongs to another user.", ephemeral=True)
+                return
+            receipt = await self.base_runtime.database.get_receipt(receipt_id)
+            if receipt is None:
+                await interaction.response.send_message(f"Receipt `{receipt_id}` was not found.", ephemeral=True)
+                return
+            if str(interaction.user.id) != receipt.creator_user_id and not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    "Only the receipt creator or an admin can do that.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(
+                EditReceiptItemsModal(
+                    self,
+                    owner_id,
+                    receipt,
+                )
+            )
+            return
         if action == "delete_confirm" and len(parts) >= 4:
             creator_user_id = parts[2]
             receipt_id = parts[3]
@@ -2514,8 +2555,7 @@ class YTAssistDiscordClient(discord.Client):
             await dispatch.reply_message.edit(
                 view=self._build_adjustprices_view(actor.id, self.base_runtime.catalog.items)
             )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     async def _send_reset_confirmation(
         self,
@@ -2559,8 +2599,7 @@ class YTAssistDiscordClient(discord.Client):
         if dispatch.reply_message is not None:
             async with self._pending_lock:
                 self._pending_resets[actor.id] = PendingReset(mode=mode, user_ids=list(user_ids))
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     async def _start_import_prompt(
         self,
@@ -2606,8 +2645,7 @@ class YTAssistDiscordClient(discord.Client):
                     prompt_message=dispatch.reply_message,
                     status_override=status_override,
                 )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     async def _start_import_from_file(
         self,
@@ -2657,8 +2695,7 @@ class YTAssistDiscordClient(discord.Client):
             attachment_filename=source_path.name,
             delete_after_use=False,
         )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     async def _stage_import_review(
         self,
@@ -2770,6 +2807,7 @@ class YTAssistDiscordClient(discord.Client):
             preview = await self.base_runtime.database.preview_sanitize(
                 self.base_runtime.config.storage.attachment_dir,
                 self.base_runtime.config.storage.export_dir,
+                self.base_runtime.config.storage.import_dir,
                 protected_import_paths=protected_import_paths,
             )
         except Exception as error:
@@ -2799,25 +2837,24 @@ class YTAssistDiscordClient(discord.Client):
             invocation_message=prefix_message,
         )
 
-        if not _sanitize_preview_has_actions(preview):
+        if not sanitize_preview_has_actions(preview):
             await self._send_reply(
                 dispatch,
                 ReplyPayload(
                     embeds=[
                         task_status_embed(
                             "YouTool Sanitize",
-                            _sanitize_noop_message(preview),
+                            sanitize_noop_message(preview),
                         )
                     ],
                     ephemeral=interaction is not None,
                 ),
             )
-            if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-                await _safe_delete_message(prefix_message)
+            _schedule_prefix_invocation_cleanup(self, prefix_message)
             return
 
         payload = ReplyPayload(
-            embeds=[task_warning_embed("YouTool Sanitize", _sanitize_confirmation_message(preview))],
+            embeds=[task_warning_embed("YouTool Sanitize", sanitize_confirmation_message(preview))],
             components=[
                 ActionRowPayload(
                     components=[
@@ -2846,8 +2883,7 @@ class YTAssistDiscordClient(discord.Client):
                     prompt_message=dispatch.reply_message,
                     preview=preview,
                 )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
     async def _start_rescan(
         self,
@@ -2904,8 +2940,7 @@ class YTAssistDiscordClient(discord.Client):
             invocation_message=prefix_message,
         )
         await self._send_reply(dispatch, progress_payload)
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
         scan_channel = self.get_channel(scan_channel_id)
         if scan_channel is None:
@@ -3141,8 +3176,7 @@ class YTAssistDiscordClient(discord.Client):
             invocation_message=prefix_message,
         )
         await self._send_reply(dispatch, progress_payload)
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-            await _safe_delete_message(prefix_message)
+        _schedule_prefix_invocation_cleanup(self, prefix_message)
 
         receipts = await self.base_runtime.database.list_all_receipts()
         bot_user = self.user
@@ -3259,8 +3293,7 @@ class YTAssistDiscordClient(discord.Client):
                     )
                 ]
             )
-            if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
-                await _safe_delete_message(prefix_message)
+            _schedule_prefix_invocation_cleanup(self, prefix_message)
         await self._announce_shutdown_status(
             restart=restart,
             source=source,
@@ -3670,7 +3703,7 @@ class YTAssistDiscordClient(discord.Client):
                         "YouTool Sanitize",
                         (
                             "Creating a backup export and applying the safe cleanup now...\n"
-                            f"{_sanitize_confirmation_message(review.preview)}"
+                            f"{sanitize_confirmation_message(review.preview)}"
                         ),
                     )
                 )
@@ -3692,6 +3725,7 @@ class YTAssistDiscordClient(discord.Client):
             report = await self.base_runtime.database.sanitize_storage(
                 self.base_runtime.config.storage.attachment_dir,
                 self.base_runtime.config.storage.export_dir,
+                self.base_runtime.config.storage.import_dir,
                 protected_import_paths=protected_import_paths,
             )
             await self.base_runtime.database.insert_audit_event(
@@ -3731,7 +3765,7 @@ class YTAssistDiscordClient(discord.Client):
                 embed_from_payload(
                     task_status_embed(
                         "YouTool Sanitize",
-                        _sanitize_completed_message(
+                        sanitize_completed_message(
                             interaction.user.id,
                             backup_path.name,
                             report,
@@ -5078,6 +5112,111 @@ class AddItemModal(discord.ui.Modal, title="Add Item"):
         await interaction.response.edit_message(**spec.edit_kwargs())
 
 
+class EditReceiptItemsModal(discord.ui.Modal, title="Edit Receipt Items"):
+    items = discord.ui.TextInput(
+        label="Items (one per line: Qty Item or Qty Item = Unit Price)",
+        custom_id="items",
+        required=True,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(
+        self,
+        client: YTAssistDiscordClient,
+        owner_user_id: int,
+        receipt,
+    ) -> None:
+        super().__init__(timeout=300)
+        self._client = client
+        self._owner_user_id = owner_user_id
+        self._receipt_id = receipt.id
+        self.items.default = _receipt_items_editor_default_text(client.base_runtime.catalog, receipt)
+
+    async def on_submit(self, interaction: discord.Interaction[Any]) -> None:
+        if interaction.user.id != self._owner_user_id:
+            await interaction.response.send_message(
+                "This receipt panel belongs to another user.",
+                ephemeral=True,
+            )
+            return
+
+        receipt = await self._client.base_runtime.database.get_receipt(self._receipt_id)
+        if receipt is None:
+            await interaction.response.send_message(
+                f"Receipt `{self._receipt_id}` was not found.",
+                ephemeral=True,
+            )
+            return
+        if str(interaction.user.id) != receipt.creator_user_id and not self._client._is_admin_user(interaction.user.id):
+            await interaction.response.send_message(
+                "Only the receipt creator or an admin can do that.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            draft_items = parse_receipt_item_editor_input(
+                self._client.base_runtime.catalog,
+                str(self.items),
+            )
+            priced = price_items(self._client.base_runtime.catalog, draft_items)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+
+        actor_display_name = getattr(interaction.user, "display_name", interaction.user.name)
+        updated = await self._client.base_runtime.database.update_receipt_items(
+            receipt.id,
+            priced.items,
+            total_sale=priced.total_sale,
+            procurement_cost=priced.procurement_cost,
+            profit=priced.profit,
+            actor=AuditEventInput(
+                actor_user_id=str(interaction.user.id),
+                actor_display_name=actor_display_name,
+                action="receipt_items_updated",
+                target_receipt_id=receipt.id,
+                detail_json={
+                    "item_count": len(priced.items),
+                    "total_sale": priced.total_sale,
+                    "procurement_cost": priced.procurement_cost,
+                    "profit": priced.profit,
+                    "items": [
+                        {
+                            "item_name": item.item_name,
+                            "quantity": item.quantity,
+                            "unit_sale_price": item.unit_sale_price,
+                            "unit_cost": item.unit_cost,
+                            "pricing_source": item.pricing_source.as_str(),
+                            "line_sale_total": item.line_sale_total,
+                            "line_cost_total": item.line_cost_total,
+                        }
+                        for item in priced.items
+                    ],
+                },
+            ),
+        )
+        if not updated:
+            await interaction.response.send_message(
+                f"Receipt `{receipt.id}` was not found.",
+                ephemeral=True,
+            )
+            return
+
+        refreshed = await self._client.base_runtime.database.get_receipt(receipt.id)
+        if refreshed is None:
+            await interaction.response.send_message(
+                f"Receipt `{receipt.id}` disappeared after saving.",
+                ephemeral=True,
+            )
+            return
+
+        await self._client._refresh_posted_receipt_messages(refreshed)
+        payload = await self._client._receipt_detail_reply(refreshed, interaction.user.id)
+        spec = reply_payload_to_spec(self._client, self._client.shared_runtime, payload)
+        await interaction.response.send_message(**spec.send_kwargs(), ephemeral=True)
+
+
 class ContractAddModal(discord.ui.Modal, title="Add or Update Contract"):
     contract_name = discord.ui.TextInput(
         label="Person / Gang",
@@ -5240,6 +5379,20 @@ async def _safe_delete_message_later(message: discord.Message, after_seconds: in
     if after_seconds > 0:
         await asyncio.sleep(after_seconds)
     await _safe_delete_message(message)
+
+
+def _schedule_prefix_invocation_cleanup(
+    client: "YTAssistDiscordClient",
+    message: discord.Message | None,
+    *,
+    skip_in_admin_channel: bool = True,
+) -> None:
+    if message is None:
+        return
+    if skip_in_admin_channel and client._is_admin_channel_id(message.channel.id):
+        return
+    timeout = client.base_runtime.config.discord.transient_message_timeout_seconds
+    client._track_task(_safe_delete_message_later(message, timeout))
 
 
 async def _safe_delete_component_message(
@@ -5684,83 +5837,28 @@ def _import_completed_message(
     return "\n".join(lines)
 
 
-def _sanitize_preview_has_actions(preview: SanitizePreview) -> bool:
-    return any(
-        value > 0
-        for value in (
-            preview.normalized_receipts,
-            preview.trimmable_non_active_receipts,
-            preview.orphan_files,
-            preview.stale_import_files,
-        )
-    )
-
-
-def _sanitize_confirmation_message(preview: SanitizePreview) -> str:
-    lines = ["Review this sanitize pass before continuing:"]
-    lines.append(
-        f"Receipt proof paths to normalize: {preview.normalized_receipts} receipt(s) / {preview.normalized_files} file(s)"
-    )
-    lines.append(
-        "Paid/invalidated proof paths safe to trim: "
-        f"{preview.trimmable_non_active_receipts} receipt(s) / {preview.trimmable_non_active_files} file(s)"
-    )
-    lines.append(
-        "Paid/invalidated proof paths retained without source URLs: "
-        f"{preview.retained_non_active_receipts}"
-    )
-    lines.append(f"Orphaned proof files: {preview.orphan_files}")
-    lines.append(f"Stale upload-import files: {preview.stale_import_files}")
-    lines.append(f"Rename collisions left untouched: {preview.rename_conflicts}")
-    if preview.rename_samples:
-        lines.append(f"Rename sample: {', '.join(preview.rename_samples)}")
-    if preview.trim_samples:
-        lines.append(
-            "Prunable receipt sample: "
-            + ", ".join(f"`{receipt_id}`" for receipt_id in preview.trim_samples)
-        )
-    if preview.retain_samples:
-        lines.append(
-            "Retained receipt sample: "
-            + ", ".join(f"`{receipt_id}`" for receipt_id in preview.retain_samples)
-        )
-    if preview.orphan_samples:
-        lines.append(f"Orphan file sample: {', '.join(f'`{name}`' for name in preview.orphan_samples)}")
-    if preview.stale_import_samples:
-        lines.append(
-            "Stale import sample: "
-            + ", ".join(f"`{name}`" for name in preview.stale_import_samples)
-        )
-    lines.append("A backup export will be saved before cleanup is applied.")
-    lines.append("Press Apply Safe Cleanup to continue, or Cancel to abort.")
+def _receipt_items_editor_default_text(catalog: Catalog, receipt) -> str:
+    lines: list[str] = []
+    for item in receipt.items:
+        line = f"{item.quantity} {item.item_name}"
+        expected_unit_price = _expected_catalog_unit_price(catalog, item.item_name, item.quantity)
+        if expected_unit_price is None or expected_unit_price != item.unit_sale_price:
+            line += f" = {item.unit_sale_price}"
+        lines.append(line)
     return "\n".join(lines)
 
 
-def _sanitize_noop_message(preview: SanitizePreview) -> str:
-    return (
-        "Nothing currently needs the safe cleanup pass.\n"
-        f"Retained non-active proof paths without source URLs: {preview.retained_non_active_receipts}\n"
-        "No proof-path normalizations, safe proof trims, orphaned files, or stale upload-import files were found."
-    )
-
-
-def _sanitize_completed_message(
-    actor_user_id: int,
-    backup_file_name: str,
-    report: SanitizeReport,
-) -> str:
-    lines = [f"Sanitize complete for <@{actor_user_id}>."]
-    lines.append(f"Backup export saved: `{backup_file_name}`")
-    lines.append(f"Receipt proof paths normalized: {report.normalized_receipts}")
-    lines.append(f"Proof files renamed: {report.normalized_files}")
-    lines.append(f"Paid/invalidated receipts trimmed: {report.trimmed_receipts}")
-    lines.append(f"Non-active proof files deleted: {report.trimmed_files}")
-    lines.append(f"Retained non-active proof paths without source URLs: {report.retained_non_active_receipts}")
-    lines.append(f"Orphaned proof files deleted: {report.orphan_files_deleted}")
-    lines.append(f"Stale upload-import files deleted: {report.stale_import_files_deleted}")
-    if report.rename_conflicts > 0:
-        lines.append(f"Rename collisions left untouched: {report.rename_conflicts}")
-    return "\n".join(lines)
+def _expected_catalog_unit_price(catalog: Catalog, item_name: str, quantity: int) -> int | None:
+    catalog_item = catalog.find_item(item_name)
+    if catalog_item is None:
+        return None
+    if (
+        catalog_item.bulk_price is not None
+        and catalog_item.bulk_min_qty is not None
+        and quantity >= catalog_item.bulk_min_qty
+    ):
+        return catalog_item.bulk_price
+    return catalog_item.unit_price
 
 
 def _adjustprices_embed(catalog_items: list[CatalogItem], notice: str | None = None) -> EmbedPayload:

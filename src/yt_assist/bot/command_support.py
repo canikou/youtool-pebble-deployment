@@ -74,6 +74,13 @@ def parse_calc_prefix_input(
 def parse_prefill_items(catalog: Catalog, input_text: str) -> list["DraftItem"]:
     from yt_assist.domain.models import DraftItem
 
+    comma_segments = [segment.strip() for segment in input_text.split(",") if segment.strip()]
+    if len(comma_segments) > 1:
+        items: list[DraftItem] = []
+        for segment in comma_segments:
+            items.extend(parse_prefill_items(catalog, segment))
+        return items
+
     tokens = [
         token
         for token in (_sanitize_prefill_token(part) for part in input_text.split())
@@ -85,7 +92,10 @@ def parse_prefill_items(catalog: Catalog, input_text: str) -> list["DraftItem"]:
     items: list[DraftItem] = []
     index = 0
     max_item_tokens = max(
-        (len(item.name.split()) for item in catalog.items),
+        (
+            max(len(name.split()) for name in [item.name, *item.aliases] if name.strip())
+            for item in catalog.items
+        ),
         default=1,
     )
 
@@ -123,6 +133,42 @@ def parse_prefill_items(catalog: Catalog, input_text: str) -> list["DraftItem"]:
         )
         index = matched_next_index
 
+    return items
+
+
+def parse_receipt_item_editor_input(catalog: Catalog, input_text: str) -> list["DraftItem"]:
+    from yt_assist.domain.models import DraftItem
+
+    lines = [line.strip() for line in input_text.replace("\r\n", "\n").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("Add at least one item.")
+
+    items: list[DraftItem] = []
+    for line in lines:
+        override_unit_price: int | None = None
+        item_text = line
+        if "=" in line:
+            item_text, override_text = line.rsplit("=", 1)
+            override_unit_price = parse_positive_amount_text(override_text)
+            item_text = item_text.strip()
+
+        parsed = parse_prefill_items(catalog, item_text)
+        if not parsed:
+            raise ValueError(f"Could not parse item line: `{line}`.")
+        if len(parsed) != 1:
+            raise ValueError(
+                f"Use one item per line when editing a receipt. Problem line: `{line}`."
+            )
+
+        item = parsed[0]
+        items.append(
+            DraftItem(
+                item_name=item.item_name,
+                quantity=item.quantity,
+                override_unit_price=override_unit_price,
+                contract_name=None,
+            )
+        )
     return items
 
 
