@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import shlex
 import time
 from dataclasses import dataclass
@@ -865,6 +866,7 @@ class YTAssistDiscordClient(discord.Client):
         self._shutdown_requested = False
         self._restart_requested = False
         self._ready_announced = False
+        self._host_shutdown_signal_name: str | None = None
         self._main_status: LifecycleStatusState | None = None
         self._admin_status: LifecycleStatusState | None = None
         self._status_message_ids: dict[int, int] = {}
@@ -1035,6 +1037,21 @@ class YTAssistDiscordClient(discord.Client):
         await self._refresh_lifecycle_status_messages_now(force=True, respect_active_session=False)
         await self._refresh_channel_heartbeats_now()
 
+    def request_host_shutdown(self, signal_name: str) -> None:
+        normalized = signal_name.strip().upper() or "SIGTERM"
+        self._host_shutdown_signal_name = normalized
+        LOGGER.warning("signal=%s graceful shutdown requested from host control plane", normalized)
+        if self.is_closed() or self._shutdown_requested:
+            return
+        self._track_task(
+            self._request_shutdown(
+                None,
+                None,
+                restart=False,
+                source="host_signal",
+            )
+        )
+
     async def _announce_shutdown_status(
         self,
         *,
@@ -1046,6 +1063,13 @@ class YTAssistDiscordClient(discord.Client):
         if source == "user" and actor_user_id is not None:
             admin_reason = (
                 f"Bot {'restart' if restart else 'shutdown'} requested by <@{actor_user_id}>. Shutting down now."
+            )
+        elif source == "host_signal":
+            signal_name = self._host_shutdown_signal_name or "SIGTERM"
+            admin_reason = (
+                f"Bot shutdown requested by the hosting panel ({signal_name}). Shutting down now."
+                if not restart
+                else f"Bot restart requested by the hosting panel ({signal_name}). Shutting down now."
             )
         elif source == "local_cli":
             admin_reason = (
@@ -6120,12 +6144,53 @@ async def run_discord(config_path: Path | None = None) -> int:
         instance_guard.release()
         raise
     client = YTAssistDiscordClient(runtime)
+    loop = asyncio.get_running_loop()
+    stop_signal_path = preflight_config.storage.database_path.parent / LOCAL_STOP_SIGNAL_FILE
+    previous_signal_handlers: dict[signal.Signals, Any] = {}
+    host_shutdown_noted = False
+
+    def _persist_host_stop_signal(signal_name: str) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        payload = f"{timestamp} {signal_name}\n"
+        try:
+            stop_signal_path.parent.mkdir(parents=True, exist_ok=True)
+            stop_signal_path.write_text(payload, encoding="utf-8")
+        except OSError as error:
+            LOGGER.warning("path=%s failed to persist host stop signal: %s", stop_signal_path, error)
+
+    def _handle_host_signal(signum: int, _frame: Any) -> None:
+        nonlocal host_shutdown_noted
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = f"SIGNAL_{signum}"
+        LOGGER.warning("signal=%s received from host", signal_name)
+        _persist_host_stop_signal(signal_name)
+        if host_shutdown_noted:
+            return
+        host_shutdown_noted = True
+        try:
+            loop.call_soon_threadsafe(client.request_host_shutdown, signal_name)
+        except RuntimeError:
+            LOGGER.warning("signal=%s host shutdown callback could not be scheduled because the event loop is closing", signal_name)
+
+    for handled_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous_signal_handlers[handled_signal] = signal.getsignal(handled_signal)
+            signal.signal(handled_signal, _handle_host_signal)
+        except (AttributeError, OSError, ValueError):
+            continue
     try:
         LOGGER.info("starting Discord runtime")
         await client.start(runtime.config.discord.token)
         return 0
     finally:
         try:
+            for handled_signal, previous_handler in previous_signal_handlers.items():
+                try:
+                    signal.signal(handled_signal, previous_handler)
+                except (AttributeError, OSError, ValueError):
+                    continue
             if not client.is_closed():
                 await client.close()
             for task in list(client._background_tasks):
