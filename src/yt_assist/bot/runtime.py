@@ -1646,7 +1646,16 @@ class YTAssistDiscordClient(discord.Client):
             credited,
         )
         if prefilled_items:
-            session.items = [DraftItem(item_name=item.item_name, quantity=item.quantity, override_unit_price=item.override_unit_price, contract_name=item.contract_name) for item in prefilled_items]
+            session.items = [
+                DraftItem(
+                    item_name=item.item_name,
+                    quantity=item.quantity,
+                    override_unit_price=item.override_unit_price,
+                    contract_name=item.contract_name,
+                )
+                for item in prefilled_items
+            ]
+            session = await self.base_runtime.bot_state.replace_session(session)
         if prefix_message is not None and prefix_message.attachments:
             await self._preload_calc_proof_from_message(actor.id, prefix_message.attachments)
             refreshed = await self.base_runtime.bot_state.current_session(actor.id)
