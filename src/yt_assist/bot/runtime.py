@@ -8,7 +8,7 @@ import logging
 import shlex
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -104,6 +104,7 @@ STATUS_REPOST_DEBOUNCE_SECONDS = 5
 STATUS_REPOST_FALLBACK_INTERVAL_SECONDS = 60
 TOPIC_HEARTBEAT_INTERVAL_SECONDS = 600
 LOCAL_STOP_SIGNAL_FILE = "yt-assist.stop"
+MANILA_OFFSET = timedelta(hours=8)
 
 
 def _default_config_path(path: Path | None) -> Path:
@@ -1347,7 +1348,7 @@ class YTAssistDiscordClient(discord.Client):
             )
             return
 
-        heartbeat = f"Status: Online! as of {datetime.now().astimezone().strftime('%H:%M:%S %m/%d/%y')}."
+        heartbeat = f"Status: Online! as of {_manila_now_local().strftime('%I:%M:%S %p %m/%d/%y')}."
         topic = heartbeat if not base_topic.strip() else f"{base_topic.strip()} | {heartbeat}"
         if topic == (channel.topic or ""):
             self._channel_topic_next_allowed_at[channel_id] = time.monotonic() + TOPIC_HEARTBEAT_INTERVAL_SECONDS
@@ -1362,7 +1363,7 @@ class YTAssistDiscordClient(discord.Client):
         timestamp = _extract_heartbeat_timestamp(topic)
         if timestamp is None:
             return
-        elapsed = (datetime.now() - timestamp).total_seconds()
+        elapsed = (_manila_now_local() - timestamp).total_seconds()
         if elapsed < 0 or elapsed >= TOPIC_HEARTBEAT_INTERVAL_SECONDS:
             return
         remaining = TOPIC_HEARTBEAT_INTERVAL_SECONDS - elapsed
@@ -5571,9 +5572,13 @@ def _extract_heartbeat_timestamp(topic: str) -> datetime | None:
     if not normalized:
         return None
     try:
-        return datetime.strptime(normalized, "%H:%M:%S %m/%d/%y")
+        return datetime.strptime(normalized, "%I:%M:%S %p %m/%d/%y")
     except ValueError:
         return None
+
+
+def _manila_now_local() -> datetime:
+    return (datetime.now(UTC) + MANILA_OFFSET).replace(tzinfo=None)
 
 
 def _is_matching_receipt_message(
