@@ -1,0 +1,43 @@
+[[items]]
+name = "Shovel"
+unit_price = 35000
+unit_cost = 4500
+active = true
+
+[[items]]
+name = "Bucket"
+unit_price = 25000
+unit_cost = 4500
+active = true
+
+[[items]]
+name = "Gloves"
+unit_price = 10500
+bulk_price = 9500
+bulk_min_qty = 50
+unit_cost = 4500
+active = true
+
+[[items]]
+name = "Chainsaw"
+unit_price = 30000
+unit_cost = 4500
+active = true
+
+[[items]]
+name = "Lockpick"
+unit_price = 4000
+unit_cost = 1500
+active = true
+
+[[items]]
+name = "Rolling Paper"
+unit_price = 1500
+unit_cost = 750
+active = true
+
+[[items]]
+name = "Plastic Bags"
+unit_price = 1500
+unit_cost = 750
+active = true

@@ -1,0 +1,14 @@
+{
+  "contracts": [
+    {
+      "name": "MALOU WANG",
+      "aliases": [],
+      "prices": [
+        {
+          "item_name": "Shovel",
+          "unit_price": 5500
+        }
+      ]
+    }
+  ]
+}

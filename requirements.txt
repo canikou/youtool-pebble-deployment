@@ -1,0 +1,4 @@
+aiosqlite>=0.20,<1
+discord.py>=2.5,<3
+pydantic>=2.9,<3
+pillow>=11,<12

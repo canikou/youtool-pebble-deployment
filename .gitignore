@@ -1,0 +1,12 @@
+data/
+logs/
+exports/
+import/
+
+config/app.toml
+
+.env
+.env.*
+!.env.example
+
+*.zip
