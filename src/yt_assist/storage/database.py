@@ -705,6 +705,46 @@ class Database:
             actor_display_name,
         )
 
+    async def procurement_balance_user_ids_for_receipts(self, receipt_ids: list[str]) -> list[str]:
+        if not receipt_ids:
+            return []
+        placeholders = ",".join("?" for _ in receipt_ids)
+        async with self._connection.execute(
+            f"""
+            SELECT DISTINCT COALESCE(accounting.recorded_for_user_id, r.creator_user_id) AS user_id
+            FROM receipts r
+            LEFT JOIN receipt_accounting accounting ON accounting.receipt_id = r.id
+            WHERE r.id IN ({placeholders})
+            ORDER BY user_id
+            """,
+            tuple(receipt_ids),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [str(row["user_id"]) for row in rows if row["user_id"] is not None]
+
+    async def settle_procurement_balances(
+        self,
+        user_ids: list[str],
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> list[tuple[str, int]]:
+        settled: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for user_id in user_ids:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            outstanding = (await self.procurement_balance(user_id)).available_total
+            ledger_id = await self.settle_procurement_balance(
+                user_id,
+                outstanding,
+                actor_user_id,
+                actor_display_name,
+            )
+            if ledger_id is not None:
+                settled.append((user_id, outstanding))
+        return settled
+
     async def update_receipt_status(
         self,
         receipt_id: str,

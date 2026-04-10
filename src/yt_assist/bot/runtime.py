@@ -3947,16 +3947,11 @@ class YTAssistDiscordClient(discord.Client):
         )
         summary = render_stats_description(_leaderboard_from_receipts(affected_receipts))
         receipt_ids = [receipt.id for receipt in affected_receipts]
-        settlement_targets: list[tuple[str, int]] = []
+        procurement_balance_user_ids: list[str] = []
         if action is ResetAction.MARK_PAID:
-            seen_users: set[str] = set()
-            for receipt in affected_receipts:
-                if receipt.creator_user_id in seen_users:
-                    continue
-                seen_users.add(receipt.creator_user_id)
-                outstanding = (await self.base_runtime.database.procurement_balance(receipt.creator_user_id)).available_total
-                if outstanding != 0:
-                    settlement_targets.append((receipt.creator_user_id, outstanding))
+            procurement_balance_user_ids = await self.base_runtime.database.procurement_balance_user_ids_for_receipts(
+                receipt_ids
+            )
         path = await save_export_async(
             filtered_bundle,
             self.base_runtime.config.storage.export_dir,
@@ -3970,14 +3965,13 @@ class YTAssistDiscordClient(discord.Client):
             getattr(interaction.user, "display_name", interaction.user.name),
             None,
         )
+        settled_procurement_balances: list[tuple[str, int]] = []
         if action is ResetAction.MARK_PAID:
-            for user_id, outstanding in settlement_targets:
-                await self.base_runtime.database.settle_procurement_balance(
-                    user_id,
-                    outstanding,
-                    str(interaction.user.id),
-                    getattr(interaction.user, "display_name", interaction.user.name),
-                )
+            settled_procurement_balances = await self.base_runtime.database.settle_procurement_balances(
+                procurement_balance_user_ids,
+                str(interaction.user.id),
+                getattr(interaction.user, "display_name", interaction.user.name),
+            )
         await self._clear_reset_sessions(scope.mode, scope.user_ids)
         completion = (
             f"{_reset_scope_action(scope.mode, scope.user_ids, action)}.\n"
@@ -3993,6 +3987,12 @@ class YTAssistDiscordClient(discord.Client):
             f"Backup saved to `{path}`\n"
             f"Previous summary:\n{summary}"
         )
+        if settled_procurement_balances:
+            count = len(settled_procurement_balances)
+            suffix = "s" if count != 1 else ""
+            completion += f"\nProcurement balance reset for {count} user{suffix}."
+            notice += f"\nProcurement balance reset for {count} user{suffix}."
+            await interaction.edit_original_response(content=completion, embeds=[], view=None)
         if interaction.channel is not None:
             await interaction.channel.send(notice)
         if main_channel is not None and getattr(main_channel, "id", None) != getattr(interaction.channel, "id", None):
