@@ -283,40 +283,36 @@ active = true
 [[items]]
 name = "FULL TUNING"
 unit_price = 200000
-unit_cost = 114000
+unit_cost = 124600
 category = "PACKAGE"
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V12)"
-unit_price = 0
-unit_cost = 816500
+unit_price = 1200000
+unit_cost = 824600
 category = "PACKAGE"
-price_pending = true
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V8)"
-unit_price = 0
-unit_cost = 616500
+unit_price = 800000
+unit_cost = 624600
 category = "PACKAGE"
-price_pending = true
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V6)"
-unit_price = 0
-unit_cost = 514000
+unit_price = 600000
+unit_cost = 524600
 category = "PACKAGE"
-price_pending = true
 active = true
 
 [[items]]
 name = "FULL UPGRADES (I4)"
-unit_price = 0
-unit_cost = 316500
+unit_price = 400000
+unit_cost = 324600
 category = "PACKAGE"
-price_pending = true
 active = true
 
 [[items]]

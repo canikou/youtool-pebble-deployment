@@ -48,6 +48,17 @@ price_item = "FULL TUNING"
 required_choices = ["drift", "tire", "drivetrain"]
 base_materials = ["TURBO CHARGER"]
 choice_material_groups = ["tire", "drift", "drivetrain"]
+extra_materials = [
+  "5x PERFORMANCE PARTS",
+  "2x Lighting Controller",
+  "Stancer Kit",
+  "Respray Kit",
+  "Vehicle Wheels Set",
+  "Tyre Smoke Kit",
+  "??x Cosmetic Parts",
+  "??x Extras Kit",
+  "REPAIR KIT",
+]
 
 [packages.full_maintenance]
 label = "Full Maintenance"
@@ -88,6 +99,7 @@ price_choice = "engine"
 base_materials = ["TURBO CHARGER"]
 choice_material_groups = ["tire", "drift", "drivetrain", "engine"]
 extra_materials = [
+  "5x PERFORMANCE PARTS",
   "2x Lighting Controller",
   "Stancer Kit",
   "Respray Kit",
@@ -95,6 +107,7 @@ extra_materials = [
   "Tyre Smoke Kit",
   "??x Cosmetic Parts",
   "??x Extras Kit",
+  "REPAIR KIT",
 ]
 
 [packages.full_upgrades.price_items]

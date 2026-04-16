@@ -5042,9 +5042,9 @@ def _display_item_name(name: str) -> str:
 
 def _package_option_description(package_key: str) -> str:
     descriptions = {
-        "full_tuning": "Turbo, tire choice, drift option, drivetrain",
+        "full_tuning": "Tier 2: tuning plus Tier 1 and repair included",
         "full_maintenance": "Standard or EV maintenance package",
-        "full_upgrades": "Engine upgrade package; price pending",
+        "full_upgrades": "Tier 3: Full Tuning plus engine included",
         "full_performance_upgrade": "Includes 5x Performance Parts",
         "full_cosmetics": "Asks for vehicle-specific cosmetic counts",
     }
@@ -5142,8 +5142,36 @@ def _insert_item_into_session(
 
 
 def _apply_package_expansion(session: CalculatorSession, expansion: PackageExpansion) -> None:
+    existing_package_keys = {item.package_key for item in session.items if item.package_key is not None}
+    if expansion.package_key in {"full_tuning", "full_performance_upgrade", "full_cosmetics"}:
+        if "full_upgrades" in existing_package_keys:
+            return
+    if expansion.package_key in {"full_performance_upgrade", "full_cosmetics"}:
+        if "full_tuning" in existing_package_keys:
+            return
     if expansion.package_key == "full_upgrades":
-        session.items = [item for item in session.items if item.package_key != "full_tuning"]
+        session.items = [
+            item
+            for item in session.items
+            if item.package_key
+            not in {
+                "full_tuning",
+                "full_performance_upgrade",
+                "full_cosmetics",
+            }
+            and item.item_name != "REPAIR KIT"
+        ]
+    if expansion.package_key == "full_tuning":
+        session.items = [
+            item
+            for item in session.items
+            if item.package_key
+            not in {
+                "full_performance_upgrade",
+                "full_cosmetics",
+            }
+            and item.item_name != "REPAIR KIT"
+        ]
     append_unique_items(session.items, expansion.draft_items)
 
 
