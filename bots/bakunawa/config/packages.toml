@@ -1,0 +1,124 @@
+[choices.tire]
+slick = "Slick Tyres"
+semi_slick = "Semi-Slick Tyres"
+off_road = "Off-Road Tyres"
+
+[choices.drift]
+drift = "Drift Kit"
+no_drift = "No Drift Kit"
+
+[choices.drivetrain]
+awd = "AWD"
+fwd = "FWD"
+rwd = "RWD"
+
+[choices.engine]
+i4 = "I4 Engine"
+v6 = "V6 Engine"
+v8 = "V8 Engine"
+v12 = "V12 Engine"
+
+[choices.maintenance_type]
+standard = "Standard"
+ev = "EV"
+
+[materials.tire]
+slick = "Slick Tyres"
+semi_slick = "Semi-Slick Tyres"
+off_road = "Off-Road Tyres"
+
+[materials.drift]
+drift = "Drift Kit"
+no_drift = ""
+
+[materials.drivetrain]
+awd = "AWD Drivetrain"
+fwd = "FWD Drivetrain"
+rwd = "RWD Drivetrain"
+
+[materials.engine]
+i4 = "I4 Engine Upgrade"
+v6 = "V6 Engine Upgrade"
+v8 = "V8 Engine Upgrade"
+v12 = "V12 Engine Upgrade"
+
+[packages.full_tuning]
+label = "Full Tuning"
+price_item = "FULL TUNING"
+required_choices = ["drift", "tire", "drivetrain"]
+base_materials = ["TURBO CHARGER"]
+choice_material_groups = ["tire", "drift", "drivetrain"]
+
+[packages.full_maintenance]
+label = "Full Maintenance"
+required_choices = ["maintenance_type"]
+variant_choice = "maintenance_type"
+
+[packages.full_maintenance.price_items]
+standard = "FULL MAINTENANCE"
+ev = "FULL MAINTENANCE (EV)"
+
+[packages.full_maintenance.materials]
+standard = [
+  "ENGINE OIL",
+  "4x TYRE REPLACEMENT",
+  "CLUTCH REPLACEMENT",
+  "AIR FILTER",
+  "4x SPARK PLUG",
+  "SUSPENSION PARTS",
+  "4x BRAKEPAD REPLACEMENT",
+]
+ev = [
+  "ENGINE OIL",
+  "4x TYRE REPLACEMENT",
+  "CLUTCH REPLACEMENT",
+  "AIR FILTER",
+  "4x SPARK PLUG",
+  "SUSPENSION PARTS",
+  "4x BRAKEPAD REPLACEMENT",
+  "EV MOTOR REPLACEMENT",
+  "EV BATTERY REPLACEMENT",
+  "EV COOLANT REPLACEMENT",
+]
+
+[packages.full_upgrades]
+label = "Full Upgrades"
+required_choices = ["drift", "tire", "drivetrain", "engine"]
+price_choice = "engine"
+base_materials = ["TURBO CHARGER"]
+choice_material_groups = ["tire", "drift", "drivetrain", "engine"]
+extra_materials = [
+  "2x Lighting Controller",
+  "Stancer Kit",
+  "Respray Kit",
+  "Vehicle Wheels Set",
+  "Tyre Smoke Kit",
+  "??x Cosmetic Parts",
+  "??x Extras Kit",
+]
+
+[packages.full_upgrades.price_items]
+i4 = "FULL UPGRADES (I4)"
+v6 = "FULL UPGRADES (V6)"
+v8 = "FULL UPGRADES (V8)"
+v12 = "FULL UPGRADES (V12)"
+
+[packages.full_performance_upgrade]
+label = "Full Performance Upgrade"
+price_item = "FULL PERFORMANCE UPGRADES"
+base_materials = ["5x PERFORMANCE PARTS"]
+
+[packages.full_cosmetics]
+label = "Full Cosmetics"
+price_item = "FULL COSMETIC"
+base_materials = [
+  "2x LIGHTING CONTROLLER",
+  "STANCER KIT",
+  "RESPRAY KIT",
+  "VEHICLE WHEELS SET",
+  "TYRE SMOKE KIT",
+]
+
+[packages.full_cosmetics.count_materials]
+cosmetic_parts = "COSMETIC PARTS"
+extras_kit = "EXTRAS KIT"

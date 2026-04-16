@@ -7,6 +7,11 @@ exports/
 import/
 
 config/app.toml
+bots/*/config/app.toml
+bots/*/data/
+bots/*/logs/
+bots/*/exports/
+bots/*/import/
 
 .env
 .env.*

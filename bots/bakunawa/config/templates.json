@@ -1,0 +1,7 @@
+{
+  "open": "/mech2 [ BAKUNAWA MECH ] The hydraulics are hissing at Postal 9035! Whether you're leaking oil or looking for more horsepower, the bays are clear and the wrenches are turning. Bring your rig in for a real tune-up.",
+  "closed": "/mech2 [ BAKUNAWA MECH ] The torches are cold and the compressor is off. We've locked down Postal 9035 for the night to recharge the crew. Catch us on the next shift--stay shiny out there.",
+  "on_the_road": "/mech2 [ BAKUNAWA MECH ] PUBLIC NOTICE: Our recovery units are hitting the pavement for a city-wide sweep. Abandoned husks and illegal parkers are being cleared under government contract. If you left it on the curb, we've probably already got it on a hook. Head to Postal 9035 to settle the bill.",
+  "unattended": "/mech2 [ BAKUNAWA MECH ] The hydraulics are hissing at Postal 9035! Whether you're leaking oil or looking for more horsepower, the bays are clear and the wrenches are turning. Bring your rig in for a real tune-up."
+}
+
