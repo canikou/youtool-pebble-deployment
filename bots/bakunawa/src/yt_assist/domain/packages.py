@@ -78,7 +78,17 @@ class PackageCatalog:
         return cls(choices=choices, materials=materials, packages=packages)
 
     def package_options(self) -> list[PackageDefinition]:
-        return list(self.packages.values())
+        preferred_order = {
+            "full_performance_upgrade": 0,
+            "full_cosmetics": 1,
+            "full_tuning": 2,
+            "full_upgrades": 3,
+            "full_maintenance": 4,
+        }
+        return sorted(
+            self.packages.values(),
+            key=lambda definition: (preferred_order.get(definition.key, 100), definition.label),
+        )
 
     def find_package(self, key: str) -> PackageDefinition | None:
         return self.packages.get(normalize_key(key))
@@ -221,6 +231,7 @@ def _package_materials(
         if material:
             materials.append(material)
     materials.extend(definition.extra_materials)
+    materials = [_material_with_inherited_count(material, counts) for material in materials]
     for count_key, material_name in definition.count_materials.items():
         count = counts[normalize_key(count_key)]
         materials.append(f"{count}x {material_name}" if count != 1 else material_name)
@@ -257,6 +268,20 @@ def _material_catalog_name(catalog: Catalog, material: str) -> str:
     if normalized.endswith("x lighting controller"):
         return "2x LIGHTING CONTROLLER"
     return material
+
+
+def _material_with_inherited_count(material: str, counts: dict[str, int]) -> str:
+    normalized = material.strip().lower()
+    replacement_keys = {
+        "??x cosmetic parts": "cosmetic_parts",
+        "??x extras kit": "extras_kit",
+    }
+    count_key = replacement_keys.get(normalized)
+    if count_key is None or count_key not in counts:
+        return material
+    count = counts[count_key]
+    item_name = material.strip()[4:].strip()
+    return f"{count}x {item_name}" if count != 1 else item_name
 
 
 def _choice_material(package_catalog: PackageCatalog, group: str, choice: str) -> str:

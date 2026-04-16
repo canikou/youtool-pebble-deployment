@@ -215,12 +215,21 @@ def lifecycle_status_embed(state: str, description: str) -> EmbedPayload:
         label = "Shutting Down"
         color = THEME_WARNING
 
+    common_commands = (
+        "`bm!calc` - create a new order\n"
+        "`bm!stats` - view all employee's stats\n"
+        "`bm!templates` - view current templates\n"
+        "`bm!pricesheet` - view pricesheet"
+    )
+
     return (
         EmbedPayload(
             title=LIFECYCLE_STATUS_TITLE,
             description=description,
             color=color,
-        ).field("State", label, True)
+        )
+        .field("State", label, True)
+        .field("Common Commands", common_commands, False)
     )
 
 

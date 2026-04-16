@@ -1846,15 +1846,23 @@ class BakunawaMechDiscordClient(discord.Client):
                 return
             package_key = parts[3]
             choices = _decode_package_choices(parts[4])
+            counts = _decode_package_counts(parts[5]) if len(parts) >= 6 else {}
             group = _next_package_choice_group(self.base_runtime.packages, package_key, choices)
             if group is None:
                 await interaction.response.send_message("Package selection is already complete.", ephemeral=True)
                 return
             choices[group] = values[0]
-            await self._continue_or_add_package(interaction, owner_id, package_key, choices, {})
+            await self._continue_or_add_package(interaction, owner_id, package_key, choices, counts)
             return
         if action == "add":
             await self._open_add_item_panel(interaction, owner_id)
+            return
+        if action == "item_category":
+            values = _interaction_values(interaction)
+            if not values:
+                await interaction.response.send_message("No item category was selected.", ephemeral=True)
+                return
+            await self._open_add_item_panel(interaction, owner_id, values[0])
             return
         if action == "pick":
             values = _interaction_values(interaction)
@@ -3067,14 +3075,39 @@ class BakunawaMechDiscordClient(discord.Client):
         await asyncio.sleep(0.5)
         await self.close()
 
-    async def _open_add_item_panel(self, interaction: discord.Interaction[Any], owner_user_id: int) -> None:
+    async def _open_add_item_panel(
+        self,
+        interaction: discord.Interaction[Any],
+        owner_user_id: int,
+        category_key: str | None = None,
+    ) -> None:
         session = await self.base_runtime.bot_state.touch_session(owner_user_id)
         if session is None:
             await interaction.response.send_message("Calculator session missing.", ephemeral=True)
             return
         embeds = [embed_from_payload(embed) for embed in calc_embeds(self.base_runtime.catalog.items, session)]
-        embeds[0].add_field(name="Next Step", value="Choose one individual item from the catalog.", inline=False)
-        view = self._build_add_item_view(owner_user_id, session)
+        if category_key is None:
+            embeds.append(
+                discord.Embed(
+                    title="Add Individual Items: Select Category",
+                    description="Pick a category first, then choose the exact item.",
+                    color=0xC99700,
+                )
+            )
+            view = self._build_add_item_category_view(owner_user_id)
+        else:
+            if not _individual_items_for_category(self.base_runtime.catalog.items, category_key):
+                await interaction.response.send_message("That item category is no longer available.", ephemeral=True)
+                return
+            category_label = _catalog_category_label(category_key)
+            embeds.append(
+                discord.Embed(
+                    title=f"Add Individual Items: {category_label}",
+                    description="Choose one item from this category.",
+                    color=0xC99700,
+                )
+            )
+            view = self._build_add_item_view(owner_user_id, session, category_key)
         await interaction.response.edit_message(content="", embeds=embeds, view=view)
 
     async def _open_add_package_panel(self, interaction: discord.Interaction[Any], owner_user_id: int) -> None:
@@ -3097,11 +3130,14 @@ class BakunawaMechDiscordClient(discord.Client):
             await interaction.response.send_modal(FullCosmeticsModal(self, owner_user_id))
             return
         choices: dict[str, str] = {}
+        counts: dict[str, int] = {}
+        session = await self.base_runtime.bot_state.current_session(owner_user_id)
+        if session is not None:
+            counts.update(_inherited_cosmetic_counts(session))
         if package_key == "full_upgrades":
-            session = await self.base_runtime.bot_state.current_session(owner_user_id)
             if session is not None:
                 choices.update(_inherited_full_tuning_choices(session))
-        await self._continue_or_add_package(interaction, owner_user_id, package_key, choices, {})
+        await self._continue_or_add_package(interaction, owner_user_id, package_key, choices, counts)
 
     async def _continue_or_add_package(
         self,
@@ -3113,7 +3149,14 @@ class BakunawaMechDiscordClient(discord.Client):
     ) -> None:
         next_group = _next_package_choice_group(self.base_runtime.packages, package_key, choices)
         if next_group is not None:
-            await self._open_package_choice_panel(interaction, owner_user_id, package_key, choices, next_group)
+            await self._open_package_choice_panel(
+                interaction,
+                owner_user_id,
+                package_key,
+                choices,
+                counts,
+                next_group,
+            )
             return
 
         try:
@@ -3143,6 +3186,7 @@ class BakunawaMechDiscordClient(discord.Client):
         owner_user_id: int,
         package_key: str,
         choices: dict[str, str],
+        counts: dict[str, int],
         group: str,
     ) -> None:
         session = await self.base_runtime.bot_state.touch_session(owner_user_id)
@@ -3154,12 +3198,18 @@ class BakunawaMechDiscordClient(discord.Client):
             await interaction.response.send_message("Package is no longer configured.", ephemeral=True)
             return
         embeds = [embed_from_payload(embed) for embed in calc_embeds(self.base_runtime.catalog.items, session)]
-        embeds[0].add_field(
-            name=f"{definition.label}: Choose {group.replace('_', ' ').title()}",
-            value="Continue through the package options. Each option set is only asked once.",
-            inline=False,
+        group_label = _choice_group_label(group)
+        embeds.append(
+            discord.Embed(
+                title=f"{definition.label}: Select {group_label}",
+                description=(
+                    f"Choose the {group_label.lower()} for this package. "
+                    "The order will not continue until this selection is made."
+                ),
+                color=0xC99700,
+            )
         )
-        view = self._build_package_choice_view(owner_user_id, package_key, choices, group)
+        view = self._build_package_choice_view(owner_user_id, package_key, choices, counts, group)
         await interaction.response.edit_message(content="", embeds=embeds, view=view)
 
     async def _open_remove_item_panel(self, interaction: discord.Interaction[Any], owner_user_id: int) -> None:
@@ -3214,17 +3264,62 @@ class BakunawaMechDiscordClient(discord.Client):
             kwargs["content"] = content
         await interaction.response.edit_message(**kwargs)
 
-    def _build_add_item_view(self, owner_user_id: int, session: CalculatorSession) -> discord.ui.View:
+    def _build_add_item_category_view(self, owner_user_id: int) -> discord.ui.View:
         timeout = self.base_runtime.config.discord.transient_message_timeout_seconds
         view = DispatchView(self, timeout)
+        options = [
+            discord.SelectOption(
+                label=category.label,
+                value=category.key,
+                description=f"{category.count} available item(s)",
+            )
+            for category in _individual_item_categories(self.base_runtime.catalog.items)
+        ]
+        view.add_item(
+            DispatchSelect(
+                client=self,
+                custom_id=f"calc|item_category|{owner_user_id}",
+                placeholder="Select item category",
+                options=options[:25],
+                row=0,
+            )
+        )
+        view.add_item(
+            DispatchButton(
+                client=self,
+                label="Back",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"calc|panel|{owner_user_id}",
+                row=1,
+            )
+        )
+        view.add_item(
+            DispatchButton(
+                client=self,
+                label="Cancel",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"calc|cancel|{owner_user_id}",
+                row=1,
+            )
+        )
+        return view
+
+    def _build_add_item_view(
+        self,
+        owner_user_id: int,
+        session: CalculatorSession,
+        category_key: str,
+    ) -> discord.ui.View:
+        timeout = self.base_runtime.config.discord.transient_message_timeout_seconds
+        view = DispatchView(self, timeout)
+        item_entries = _individual_items_for_category(self.base_runtime.catalog.items, category_key)
         options = [
             discord.SelectOption(
                 label=_display_item_name(item.name),
                 value=str(index),
                 description=_catalog_item_option_description(item),
             )
-            for index, item in enumerate(self.base_runtime.catalog.items)
-            if item.active
+            for index, item in item_entries[:25]
         ]
         view.add_item(
             DispatchSelect(
@@ -3239,7 +3334,7 @@ class BakunawaMechDiscordClient(discord.Client):
             item_index = session.last_selected_item_index
             if 0 <= item_index < len(self.base_runtime.catalog.items):
                 item = self.base_runtime.catalog.items[item_index]
-                if item.active:
+                if item.active and _catalog_category_key(item) == category_key:
                     view.add_item(
                         DispatchButton(
                             client=self,
@@ -3294,7 +3389,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 client=self,
                 label="Back",
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"calc|panel|{owner_user_id}",
+                custom_id=f"calc|add|{owner_user_id}",
                 row=1,
             )
         )
@@ -3314,6 +3409,7 @@ class BakunawaMechDiscordClient(discord.Client):
         owner_user_id: int,
         package_key: str,
         choices: dict[str, str],
+        counts: dict[str, int],
         group: str,
     ) -> discord.ui.View:
         timeout = self.base_runtime.config.discord.transient_message_timeout_seconds
@@ -3326,8 +3422,11 @@ class BakunawaMechDiscordClient(discord.Client):
         view.add_item(
             DispatchSelect(
                 client=self,
-                custom_id=f"calc|package_choice|{owner_user_id}|{package_key}|{_encode_package_choices(choices)}",
-                placeholder=f"Select {group.replace('_', ' ')}",
+                custom_id=(
+                    f"calc|package_choice|{owner_user_id}|{package_key}|"
+                    f"{_encode_package_choices(choices)}|{_encode_package_counts(counts)}"
+                ),
+                placeholder=f"Select {_choice_group_label(group)}",
                 options=options,
                 row=0,
             )
@@ -5040,13 +5139,100 @@ def _display_item_name(name: str) -> str:
     return title
 
 
+@dataclass(frozen=True)
+class IndividualItemCategory:
+    key: str
+    label: str
+    count: int
+
+
+INDIVIDUAL_CATEGORY_ORDER = {
+    "tuning": 0,
+    "engine_upgrade": 1,
+    "maintenance": 2,
+    "cosmetic": 3,
+    "repair": 4,
+    "takeout": 5,
+    "other": 6,
+}
+
+
+def _individual_item_categories(catalog_items: list[CatalogItem]) -> list[IndividualItemCategory]:
+    counts: dict[str, int] = {}
+    for _, item in _individual_catalog_entries(catalog_items):
+        key = _catalog_category_key(item)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        IndividualItemCategory(key=key, label=_catalog_category_label(key), count=count)
+        for key, count in sorted(
+            counts.items(),
+            key=lambda entry: (
+                INDIVIDUAL_CATEGORY_ORDER.get(entry[0], 100),
+                _catalog_category_label(entry[0]),
+            ),
+        )
+    ]
+
+
+def _individual_items_for_category(
+    catalog_items: list[CatalogItem],
+    category_key: str,
+) -> list[tuple[int, CatalogItem]]:
+    normalized_key = category_key.strip().lower()
+    return [
+        (index, item)
+        for index, item in _individual_catalog_entries(catalog_items)
+        if _catalog_category_key(item) == normalized_key
+    ]
+
+
+def _individual_catalog_entries(catalog_items: list[CatalogItem]) -> list[tuple[int, CatalogItem]]:
+    return [
+        (index, item)
+        for index, item in enumerate(catalog_items)
+        if item.active and _catalog_category_key(item) != "package"
+    ]
+
+
+def _catalog_category_key(item: CatalogItem) -> str:
+    raw = (item.category or "other").strip()
+    if not raw:
+        raw = "other"
+    return raw.lower().replace(" ", "_")
+
+
+def _catalog_category_label(category_key: str) -> str:
+    labels = {
+        "tuning": "Tuning",
+        "engine_upgrade": "Engine Upgrades",
+        "maintenance": "Maintenance",
+        "cosmetic": "Cosmetics",
+        "repair": "Repair",
+        "takeout": "Takeout",
+        "other": "Other",
+        "package": "Packages",
+    }
+    return labels.get(category_key, category_key.replace("_", " ").title())
+
+
+def _choice_group_label(group: str) -> str:
+    labels = {
+        "tire": "Tire Type",
+        "drift": "Drift Option",
+        "drivetrain": "Drivetrain",
+        "engine": "Engine",
+        "maintenance_type": "Maintenance Type",
+    }
+    return labels.get(group, group.replace("_", " ").title())
+
+
 def _package_option_description(package_key: str) -> str:
     descriptions = {
-        "full_tuning": "Tier 2: tuning plus Tier 1 and repair included",
+        "full_tuning": "TIER 2: tuning plus Tier 1 and repair included",
         "full_maintenance": "Standard or EV maintenance package",
-        "full_upgrades": "Tier 3: Full Tuning plus engine included",
-        "full_performance_upgrade": "Tier 1: includes 5x Performance Parts",
-        "full_cosmetics": "Tier 1: asks for vehicle-specific cosmetic counts",
+        "full_upgrades": "TIER 3: Full Tuning plus engine included",
+        "full_performance_upgrade": "TIER 1: includes 5x Performance Parts",
+        "full_cosmetics": "TIER 1: asks for vehicle-specific cosmetic counts",
     }
     return descriptions.get(package_key, "Package")
 
@@ -5067,6 +5253,27 @@ def _decode_package_choices(encoded: str) -> dict[str, str]:
         key, value = part.split("=", 1)
         choices[key] = value
     return choices
+
+
+def _encode_package_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "-"
+    return ",".join(f"{key}={value}" for key, value in sorted(counts.items()))
+
+
+def _decode_package_counts(encoded: str) -> dict[str, int]:
+    if not encoded or encoded == "-":
+        return {}
+    counts: dict[str, int] = {}
+    for part in encoded.split(","):
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        try:
+            counts[key] = int(value)
+        except ValueError:
+            continue
+    return counts
 
 
 def _next_package_choice_group(packages, package_key: str, choices: dict[str, str]) -> str | None:
@@ -5183,6 +5390,19 @@ def _inherited_full_tuning_choices(session: CalculatorSession) -> dict[str, str]
                 for key, value in item.package_choices.items()
                 if key in {"drift", "tire", "drivetrain"}
             }
+    return {}
+
+
+def _inherited_cosmetic_counts(session: CalculatorSession) -> dict[str, int]:
+    for item in session.items:
+        if item.package_key in {"full_cosmetics", "full_tuning", "full_upgrades"}:
+            counts = {
+                key: value
+                for key, value in item.package_counts.items()
+                if key in {"cosmetic_parts", "extras_kit"}
+            }
+            if counts:
+                return counts
     return {}
 
 
