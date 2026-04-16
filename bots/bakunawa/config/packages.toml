@@ -43,7 +43,7 @@ v8 = "V8 Engine Upgrade"
 v12 = "V12 Engine Upgrade"
 
 [packages.full_tuning]
-label = "Full Tuning"
+label = "[TIER 2] Full Tuning"
 price_item = "FULL TUNING"
 required_choices = ["drift", "tire", "drivetrain"]
 base_materials = ["TURBO CHARGER"]
@@ -61,7 +61,7 @@ extra_materials = [
 ]
 
 [packages.full_maintenance]
-label = "Full Maintenance"
+label = "[MAINTENANCE] Full Maintenance"
 required_choices = ["maintenance_type"]
 variant_choice = "maintenance_type"
 
@@ -93,7 +93,7 @@ ev = [
 ]
 
 [packages.full_upgrades]
-label = "Full Upgrades"
+label = "[TIER 3] Full Tuning + Engine"
 required_choices = ["drift", "tire", "drivetrain", "engine"]
 price_choice = "engine"
 base_materials = ["TURBO CHARGER"]
@@ -117,12 +117,12 @@ v8 = "FULL UPGRADES (V8)"
 v12 = "FULL UPGRADES (V12)"
 
 [packages.full_performance_upgrade]
-label = "Full Performance Upgrade"
+label = "[TIER 1] Full Perf. Upgrades"
 price_item = "FULL PERFORMANCE UPGRADES"
 base_materials = ["5x PERFORMANCE PARTS"]
 
 [packages.full_cosmetics]
-label = "Full Cosmetics"
+label = "[TIER 1] Full Cosmetics"
 price_item = "FULL COSMETIC"
 base_materials = [
   "2x LIGHTING CONTROLLER",

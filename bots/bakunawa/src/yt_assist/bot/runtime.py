@@ -5045,8 +5045,8 @@ def _package_option_description(package_key: str) -> str:
         "full_tuning": "Tier 2: tuning plus Tier 1 and repair included",
         "full_maintenance": "Standard or EV maintenance package",
         "full_upgrades": "Tier 3: Full Tuning plus engine included",
-        "full_performance_upgrade": "Includes 5x Performance Parts",
-        "full_cosmetics": "Asks for vehicle-specific cosmetic counts",
+        "full_performance_upgrade": "Tier 1: includes 5x Performance Parts",
+        "full_cosmetics": "Tier 1: asks for vehicle-specific cosmetic counts",
     }
     return descriptions.get(package_key, "Package")
 
