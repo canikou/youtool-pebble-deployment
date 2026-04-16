@@ -60,11 +60,13 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     command = args.command or "run"
+    default_config_path = Path("config") / "app.toml"
+    config_path = getattr(args, "config", default_config_path)
 
     if command == "run":
-        return asyncio.run(run_discord(args.config))
+        return asyncio.run(run_discord(config_path))
     if command == "console":
-        return asyncio.run(run_console(args.config, args.input_command))
+        return asyncio.run(run_console(config_path, args.input_command))
     if command == "parity-harness":
         report = asyncio.run(run_harness(args.workspace_root))
         print(report.render_text())
