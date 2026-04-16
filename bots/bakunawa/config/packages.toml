@@ -135,3 +135,7 @@ base_materials = [
 [packages.full_cosmetics.count_materials]
 cosmetic_parts = "COSMETIC PARTS"
 extras_kit = "EXTRAS KIT"
+
+[packages.repair]
+label = "[REPAIR] Repair Kit"
+price_item = "REPAIR KIT"

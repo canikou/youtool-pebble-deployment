@@ -84,6 +84,7 @@ class PackageCatalog:
             "full_tuning": 2,
             "full_upgrades": 3,
             "full_maintenance": 4,
+            "repair": 5,
         }
         return sorted(
             self.packages.values(),

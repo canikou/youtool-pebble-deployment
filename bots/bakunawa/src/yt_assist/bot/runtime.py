@@ -5233,6 +5233,7 @@ def _package_option_description(package_key: str) -> str:
         "full_upgrades": "TIER 3: Full Tuning plus engine included",
         "full_performance_upgrade": "TIER 1: includes 5x Performance Parts",
         "full_cosmetics": "TIER 1: asks for vehicle-specific cosmetic counts",
+        "repair": "REPAIR: quick 15k repair kit",
     }
     return descriptions.get(package_key, "Package")
 
@@ -5350,10 +5351,10 @@ def _insert_item_into_session(
 
 def _apply_package_expansion(session: CalculatorSession, expansion: PackageExpansion) -> None:
     existing_package_keys = {item.package_key for item in session.items if item.package_key is not None}
-    if expansion.package_key in {"full_tuning", "full_performance_upgrade", "full_cosmetics"}:
+    if expansion.package_key in {"full_tuning", "full_performance_upgrade", "full_cosmetics", "repair"}:
         if "full_upgrades" in existing_package_keys:
             return
-    if expansion.package_key in {"full_performance_upgrade", "full_cosmetics"}:
+    if expansion.package_key in {"full_performance_upgrade", "full_cosmetics", "repair"}:
         if "full_tuning" in existing_package_keys:
             return
     if expansion.package_key == "full_upgrades":
