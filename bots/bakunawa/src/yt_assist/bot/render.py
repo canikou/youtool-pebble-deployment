@@ -530,7 +530,13 @@ def task_error_embed(title: str, description: str) -> EmbedPayload:
 
 
 def calc_message_content(session) -> str:
-    return ""
+    if not getattr(session, "rescan_active", False):
+        return ""
+    proof_urls = getattr(session, "payment_proof_source_url", None)
+    urls = [line.strip() for line in (proof_urls or "").splitlines() if line.strip()]
+    if not urls:
+        return ""
+    return "Original proof:\n" + "\n".join(urls)
 
 
 def calc_reply_payload(catalog_items: list[CatalogItem], session) -> ReplyPayload:
@@ -547,12 +553,18 @@ def calc_reply_payload(catalog_items: list[CatalogItem], session) -> ReplyPayloa
 
 
 def calc_embeds(catalog_items: list[CatalogItem], session) -> list[EmbedPayload]:
-    return [calc_embed(catalog_items, session)]
+    embeds = [calc_embed(catalog_items, session)]
+    embeds.extend(
+        proof_preview_embeds(session.payment_proof_source_url, "Bakunawa Mech Receipt Proof")
+    )
+    return embeds
 
 
 def calc_embed(catalog_items: list[CatalogItem], session) -> EmbedPayload:
     embed = panel_embed("Bakunawa Mech Calculator", render_session_description(catalog_items, session))
     embed.color = 0xDAA520 if session.awaiting_proof else THEME_SUCCESS
+    if session.awaiting_proof:
+        return embed.with_footer("Awaiting proof upload in this channel.")
     return embed.with_footer(
         "Use Add Package or Add Individual Items, then Print Receipt when ready."
     )
@@ -563,7 +575,7 @@ def calc_processing_embed(catalog_items: list[CatalogItem], session, status: str
         catalog_items,
         session,
         status,
-        "Saving receipt...",
+        "Processing proof and saving receipt...",
         THEME_WARNING,
     )
 
@@ -573,7 +585,7 @@ def calc_failure_embed(catalog_items: list[CatalogItem], session, status: str) -
         catalog_items,
         session,
         status,
-        "Review the selected items, then try again or press Cancel.",
+        "Upload another proof image in this channel to try again, or press Cancel.",
         THEME_WARNING,
     )
 
@@ -628,6 +640,7 @@ def render_session_description(
             "**Company Cost:** $0\n"
             "**Profit:** $0\n"
             "**Staff Pay (50% Profit):** $0\n\n"
+            f"**Proof:** {session_proof_status(session)}\n\n"
             "**Billable Items:**\n"
             "- No items yet"
         )
@@ -669,6 +682,9 @@ def render_session_description(
     workflow_notice = (
         f"\n**Workflow:** {session.workflow_notice}\n" if session.workflow_notice else ""
     )
+    awaiting = ""
+    if session.awaiting_proof and not force_not_awaiting:
+        awaiting = "\n\n**Status:** Waiting for proof image upload in this channel."
     billable_text = "\n".join(billable_lines) if billable_lines else "- No billable items yet"
     material_text = (
         "\n".join(sorted(material_lines, key=_material_line_sort_key))
@@ -683,10 +699,23 @@ def render_session_description(
         f"**Company Cost:** ${format_money(priced.procurement_cost)}\n"
         f"**Profit:** ${format_money(priced.profit)}\n"
         f"**Staff Pay (50% Profit):** ${format_half_money(staff_pay_half_units)}\n"
+        f"**Proof:** {session_proof_status(session)}\n"
         f"{workflow_notice}"
         f"**Billable Items:**\n{billable_text}\n\n"
         f"**Estimated Required Materials / Items:**\n{material_text}"
+        f"{awaiting}"
     )
+
+
+def session_proof_status(session) -> str:
+    count = len([line for line in (session.payment_proof_source_url or "").splitlines() if line.strip()])
+    if count == 0 and session.awaiting_proof:
+        return "Waiting for upload"
+    if count == 0:
+        return "None"
+    if count == 1:
+        return "Attached (1 image)"
+    return f"Attached ({count} images)"
 
 
 def calc_action_rows(
@@ -861,8 +890,12 @@ def receipt_detail_payload(
         "Finalized At",
         receipt.finalized_at.isoformat(),
         False,
+    ).field(
+        "Payment Proofs",
+        payment_proof_field_value(receipt.payment_proof_source_url),
+        False,
     ).with_footer(
-        "Active receipts affect payouts. Paid receipts stay in stats only. Invalidated receipts are excluded."
+        "Active receipts affect payouts. Paid receipts stay in stats only. Invalidated receipts are excluded. Replace Proof keeps the receipt ID."
     )
     apply_receipt_display_context(base_embed, display)
 
@@ -874,8 +907,18 @@ def receipt_detail_payload(
         )
         for action in admin_receipt_actions(receipt.status)
     ]
+    buttons.append(
+        ButtonPayload(
+            custom_id=f"receipt|proof|{owner_user_id}|{receipt.id}",
+            label="Replace Proof",
+            style=BUTTON_STYLE_PRIMARY,
+        )
+    )
     return ReplyPayload(
-        embeds=[base_embed],
+        embeds=[
+            base_embed,
+            *proof_preview_embeds(receipt.payment_proof_source_url, "Bakunawa Mech Receipt Proof"),
+        ],
         components=[ActionRowPayload(components=buttons)],
         ephemeral=True,
     )
@@ -898,7 +941,7 @@ def receipt_main_payload(
         embed.field("Status", admin_receipt_status_label(receipt.status), True)
     return ReplyPayload(
         content=receipt_message_content(receipt.id, receipt.creator_user_id),
-        embeds=[embed],
+        embeds=[embed, *proof_preview_embeds(receipt.payment_proof_source_url, "Payment Proof")],
         components=[ActionRowPayload(components=receipt_main_action_buttons(receipt.id, receipt.creator_user_id))],
         ephemeral=False,
     )
@@ -920,7 +963,7 @@ def receipt_log_payload(
     embed.field("Status", admin_receipt_status_label(receipt.status), True)
     return ReplyPayload(
         content=receipt_message_content(receipt.id, receipt.creator_user_id),
-        embeds=[embed],
+        embeds=[embed, *proof_preview_embeds(receipt.payment_proof_source_url, "Payment Proof")],
         components=[ActionRowPayload(components=receipt_log_action_buttons(receipt.id, receipt.creator_user_id, receipt.status))],
         ephemeral=False,
     )
@@ -1011,6 +1054,19 @@ def accounting_policy_label(policy: AccountingPolicy) -> str:
     if policy is AccountingPolicy.PROCUREMENT_FUNDS:
         return "Company billed"
     return "Company billed"
+
+
+def payment_proof_field_value(payment_proof_source_url: str | None) -> str:
+    urls = [line.strip() for line in (payment_proof_source_url or "").splitlines() if line.strip()]
+    return "\n".join(urls) if urls else "No payment proof URL recorded."
+
+
+def proof_preview_embeds(proof_urls: str | None, title_prefix: str) -> list[EmbedPayload]:
+    urls = [line.strip() for line in (proof_urls or "").splitlines() if line.strip()]
+    return [
+        info_panel_embed(f"{title_prefix} {index}", f"Open: {url}").with_image(url)
+        for index, url in enumerate(urls, start=1)
+    ]
 
 
 def _receipt_item_lines(items: list[PricedItem]) -> list[str]:

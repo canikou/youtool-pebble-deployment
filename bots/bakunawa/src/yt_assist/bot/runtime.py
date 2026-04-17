@@ -41,7 +41,7 @@ from yt_assist.domain.models import (
 )
 from yt_assist.domain.packages import PackageExpansion, PackageSelection, append_unique_items, expand_package
 from yt_assist.domain.pricing import price_items
-from yt_assist.domain.proof import join_proof_values, save_proof_attachment
+from yt_assist.domain.proof import join_proof_values, save_proof_attachment, split_proof_values
 from yt_assist.single_instance import SingleInstanceError, SingleInstanceGuard
 from yt_assist.storage.database import ImportPreview, ImportReport
 
@@ -74,6 +74,7 @@ from .render import (
     calc_completed_embed,
     calc_embeds,
     calc_failure_embed,
+    calc_processing_embed,
     calc_reply_payload,
     calc_timeout_action_rows,
     calc_timeout_warning_embed,
@@ -883,6 +884,10 @@ class BakunawaMechDiscordClient(discord.Client):
         if message.attachments and (is_allowed_channel or is_admin_channel):
             if await self._handle_pending_import(message):
                 return
+            if await self._handle_pending_proof_update(message):
+                return
+            if await self._handle_waiting_receipt_proof(message):
+                return
 
         prefix_match = self._parse_prefix_command(message.content)
         if prefix_match is not None:
@@ -1583,6 +1588,12 @@ class BakunawaMechDiscordClient(discord.Client):
                 for item in prefilled_items
             ]
         await self.base_runtime.bot_state.replace_session(session)
+        if prefix_message is not None and prefix_message.attachments:
+            await self._preload_calc_proof_from_message(actor.id, prefix_message.attachments)
+            refreshed = await self.base_runtime.bot_state.current_session(actor.id)
+            if refreshed is not None:
+                session = refreshed
+        await self.base_runtime.bot_state.replace_session(session)
         payload = calc_reply_payload(self.base_runtime.catalog.items, session)
 
         dispatch = DiscordDispatchContext(
@@ -1960,30 +1971,94 @@ class BakunawaMechDiscordClient(discord.Client):
             if not session.items:
                 await interaction.response.send_message("Add at least one package or item before printing the receipt.", ephemeral=True)
                 return
-            try:
-                receipt_id = await self._finalize_session_receipt(
-                    session,
-                    actor_user_id=str(interaction.user.id),
-                    actor_display_name=getattr(interaction.user, "display_name", interaction.user.name),
-                    guild_id=str(interaction.guild.id) if interaction.guild is not None else None,
-                    channel_id=str(interaction.channel_id),
-                    proof_message_id=None,
-                )
-            except Exception as error:
+            if session.payment_proof_path and session.payment_proof_source_url:
+                try:
+                    processing = await self.base_runtime.bot_state.mark_proof_processing(owner_id)
+                except ValueError:
+                    return
                 await interaction.response.edit_message(
                     content="",
-                    embeds=[embed_from_payload(calc_failure_embed(self.base_runtime.catalog.items, session, f"Receipt finalization failed for <@{interaction.user.id}>: {error}"))],
-                    view=PayloadView(self, self.shared_runtime, ReplyPayload(components=calc_action_rows(session.user_id, False, session.rescan_active))),
+                    embeds=[
+                        embed_from_payload(
+                            calc_processing_embed(
+                                self.base_runtime.catalog.items,
+                                processing,
+                                "Receipt proof already attached. Finalizing receipt now...",
+                            )
+                        )
+                    ],
+                    view=None,
                 )
-                raise
-            await interaction.response.edit_message(
-                content="",
-                embeds=[embed_from_payload(calc_completed_embed(receipt_id))],
-                view=None,
-            )
-            original = await self._try_original_response(interaction)
-            if original is not None:
-                self._track_task(_safe_delete_message_later(original, 10))
+                try:
+                    receipt_id = await self._finalize_session_receipt(
+                        processing,
+                        actor_user_id=str(interaction.user.id),
+                        actor_display_name=getattr(interaction.user, "display_name", interaction.user.name),
+                        guild_id=str(interaction.guild.id) if interaction.guild is not None else None,
+                        channel_id=str(interaction.channel_id),
+                        proof_message_id=None,
+                    )
+                except Exception as error:
+                    await self.base_runtime.bot_state.restore_after_finalize_failure(
+                        owner_id,
+                        awaiting_proof=False,
+                    )
+                    await interaction.edit_original_response(
+                        content="",
+                        embeds=[
+                            embed_from_payload(
+                                calc_failure_embed(
+                                    self.base_runtime.catalog.items,
+                                    session,
+                                    f"Receipt finalization failed for <@{interaction.user.id}>: {error}",
+                                )
+                            )
+                        ],
+                        view=PayloadView(
+                            self,
+                            self.shared_runtime,
+                            ReplyPayload(components=calc_action_rows(session.user_id, False, session.rescan_active)),
+                        ),
+                    )
+                    raise
+                await interaction.edit_original_response(
+                    content="",
+                    embeds=[embed_from_payload(calc_completed_embed(receipt_id))],
+                    view=None,
+                )
+                original = await self._try_original_response(interaction)
+                if processing.rescan_active and original is not None:
+                    next_session = await self._advance_rescan_after_success(processing)
+                    if next_session is not None:
+                        await original.edit(
+                            **reply_payload_to_spec(
+                                self,
+                                self.shared_runtime,
+                                calc_reply_payload(self.base_runtime.catalog.items, next_session),
+                            ).edit_kwargs()
+                        )
+                        return
+                    await original.edit(
+                        content="",
+                        embeds=[
+                            embed_from_payload(
+                                task_status_embed(
+                                    "Bakunawa Mech Rescan",
+                                    "Receipt saved. No more undocumented receipt candidates remain in this queue.",
+                                )
+                            )
+                        ],
+                        view=None,
+                    )
+                if original is not None:
+                    self._track_task(_safe_delete_message_later(original, 10))
+                return
+            try:
+                waiting = await self.base_runtime.bot_state.mark_waiting_for_proof(owner_id)
+            except ValueError as error:
+                await interaction.response.send_message(str(error), ephemeral=True)
+                return
+            await self._edit_calc_panel(interaction, waiting)
             return
 
     async def _handle_manage_component(
@@ -4120,9 +4195,9 @@ class BakunawaMechDiscordClient(discord.Client):
         channel_id: str,
         proof_message_id: int | None,
     ) -> str:
-        del proof_message_id
         priced = price_items(self.base_runtime.catalog, session.items)
         receipt_id = new_receipt_id()
+        proof_urls = split_proof_values(session.payment_proof_source_url)
         receipt = NewReceipt(
             id=receipt_id,
             creator_user_id=session.credited_user_id,
@@ -4134,8 +4209,8 @@ class BakunawaMechDiscordClient(discord.Client):
             procurement_cost=priced.procurement_cost,
             profit=priced.profit,
             status=ReceiptStatus.ACTIVE,
-            payment_proof_path=None,
-            payment_proof_source_url=None,
+            payment_proof_path=session.payment_proof_path,
+            payment_proof_source_url=session.payment_proof_source_url,
             finalized_at=utcnow(),
             items=priced.items,
         )
@@ -4160,6 +4235,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 "company_cost": receipt.procurement_cost,
                 "credited_user_id": receipt.creator_user_id,
                 "credited_display_name": receipt.creator_display_name,
+                "proof_message_id": proof_message_id,
+                "proof_url": proof_urls[0] if proof_urls else None,
+                "proof_urls": proof_urls,
             },
         )
         await self.base_runtime.database.save_receipt_with_accounting(receipt, audit, accounting)
