@@ -161,6 +161,14 @@ class DiscordDispatchContext:
     reply_message: discord.Message | None = None
 
 
+@dataclass(slots=True)
+class CleanResult:
+    inspected: int = 0
+    deleted: int = 0
+    preserved: int = 0
+    failed: int = 0
+
+
 class ResetMode(str, Enum):
     ALL = "all"
     ONLY = "only"
@@ -926,6 +934,12 @@ class BakunawaMechDiscordClient(discord.Client):
             if command_name == "rebuildlogs":
                 await self._run_rebuild_logs_prefix(message)
                 return
+            if command_name == "clean":
+                await self._run_clean_prefix(message)
+                return
+            if command_name == "note":
+                await self._run_note_prefix(message, remainder)
+                return
             if command_name == "restartbot":
                 await self._run_restart_prefix(message)
                 return
@@ -1552,6 +1566,91 @@ class BakunawaMechDiscordClient(discord.Client):
             return
         await self._rebuild_receipt_logs(message.author, message.channel, prefix_message=message)
 
+    async def _run_clean_prefix(self, message: discord.Message) -> None:
+        if not self._is_admin_user(message.author.id):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot."))]
+            )
+            return
+        if not self._is_scoped_messageable_channel(message.channel):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel."))]
+            )
+            return
+        progress = await message.channel.send(
+            embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Clean", "Cleaning non-log messages in this channel..."))]
+        )
+        result = await self._clean_non_log_messages(message.channel, preserve_message_ids={progress.id})
+        await progress.edit(
+            embeds=[
+                embed_from_payload(
+                    task_status_embed(
+                        "Bakunawa Mech Clean",
+                        _clean_result_description(result),
+                    )
+                )
+            ]
+        )
+        self._track_task(
+            _safe_delete_message_later(
+                progress,
+                self.base_runtime.config.discord.transient_message_timeout_seconds,
+            )
+        )
+
+    async def _run_note_prefix(self, message: discord.Message, remainder: str) -> None:
+        if not self._is_scoped_messageable_channel(message.channel):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel."))]
+            )
+            return
+        try:
+            receipt_id, note = _parse_note_command(remainder)
+        except ValueError as error:
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Receipt Note", str(error)))]
+            )
+            return
+        receipt = await self.base_runtime.database.get_receipt(receipt_id)
+        if receipt is None:
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Receipt Note", f"Receipt `{receipt_id}` was not found."))]
+            )
+            return
+        if str(message.author.id) != receipt.creator_user_id and not self._is_admin_user(message.author.id):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Receipt Note", "Only the receipt creator or an admin can edit that note."))]
+            )
+            return
+        updated = await self._set_receipt_note(
+            receipt_id,
+            note,
+            actor_user_id=str(message.author.id),
+            actor_display_name=getattr(message.author, "display_name", message.author.name),
+        )
+        if not updated:
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Receipt Note", f"Receipt `{receipt_id}` was not found."))]
+            )
+            return
+        await _safe_delete_message(message)
+        reply = await message.channel.send(
+            embeds=[
+                embed_from_payload(
+                    task_status_embed(
+                        "Bakunawa Mech Receipt Note",
+                        f"Updated note for receipt `{receipt_id}`.",
+                    )
+                )
+            ]
+        )
+        self._track_task(
+            _safe_delete_message_later(
+                reply,
+                self.base_runtime.config.discord.transient_message_timeout_seconds,
+            )
+        )
+
     async def _run_restart_prefix(self, message: discord.Message) -> None:
         if not self._is_admin_user(message.author.id):
             await message.channel.send(
@@ -1898,6 +1997,7 @@ class BakunawaMechDiscordClient(discord.Client):
             ("embed_links", "Embed Links"),
             ("attach_files", "Attach Files"),
             ("read_message_history", "Read Message History"),
+            ("manage_messages", "Manage Messages"),
             ("manage_channels", "Manage Channels"),
             ("manage_threads", "Manage Threads"),
         ]
@@ -1909,6 +2009,7 @@ class BakunawaMechDiscordClient(discord.Client):
             ("embed_links", "Embed Links"),
             ("attach_files", "Attach Files"),
             ("read_message_history", "Read Message History"),
+            ("manage_messages", "Manage Messages"),
             ("manage_threads", "Manage Threads"),
         ]
 
@@ -2283,6 +2384,21 @@ class BakunawaMechDiscordClient(discord.Client):
             spec = reply_payload_to_spec(self, self.shared_runtime, payload)
             await interaction.response.send_message(**spec.send_kwargs(), ephemeral=True)
             return
+        if action == "note" and len(parts) >= 4:
+            creator_user_id = parts[2]
+            receipt_id = parts[3]
+            if str(interaction.user.id) != creator_user_id and not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    "Only the receipt creator or an admin can edit that note.",
+                    ephemeral=True,
+                )
+                return
+            receipt = await self.base_runtime.database.get_receipt(receipt_id)
+            if receipt is None:
+                await interaction.response.send_message(f"Receipt `{receipt_id}` was not found.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ReceiptNoteModal(self, receipt.id, receipt.admin_note))
+            return
         if action == "delete_confirm" and len(parts) >= 4:
             creator_user_id = parts[2]
             receipt_id = parts[3]
@@ -2336,6 +2452,17 @@ class BakunawaMechDiscordClient(discord.Client):
             payload = await self._receipt_log_reply(receipt)
             await interaction.response.edit_message(**reply_payload_to_spec(self, self.shared_runtime, payload).edit_kwargs())
             return
+        if action == "log_note" and len(parts) >= 3:
+            if not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message("You are not an admin for this bot.", ephemeral=True)
+                return
+            receipt_id = parts[2]
+            receipt = await self.base_runtime.database.get_receipt(receipt_id)
+            if receipt is None:
+                await interaction.response.send_message(f"Receipt `{receipt_id}` was not found.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ReceiptNoteModal(self, receipt.id, receipt.admin_note))
+            return
         if action == "log_status" and len(parts) >= 4:
             if not self._is_admin_user(interaction.user.id):
                 await interaction.response.send_message("You are not an admin for this bot.", ephemeral=True)
@@ -2361,6 +2488,21 @@ class BakunawaMechDiscordClient(discord.Client):
                 await interaction.response.send_message("Invalid receipt status target.", ephemeral=True)
                 return
             await self._update_receipt_status(interaction, receipt_id, status, update_message=True, detail_owner_id=owner_id)
+            return
+        if action == "detail_note" and len(parts) >= 4:
+            owner_id = int(parts[2])
+            if owner_id != interaction.user.id:
+                await interaction.response.send_message("This receipt panel belongs to another user.", ephemeral=True)
+                return
+            if not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message("You are not an admin for this bot.", ephemeral=True)
+                return
+            receipt_id = parts[3]
+            receipt = await self.base_runtime.database.get_receipt(receipt_id)
+            if receipt is None:
+                await interaction.response.send_message(f"Receipt `{receipt_id}` was not found.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ReceiptNoteModal(self, receipt.id, receipt.admin_note))
             return
         if action == "proof":
             owner_id = int(parts[2])
@@ -3247,6 +3389,64 @@ class BakunawaMechDiscordClient(discord.Client):
         except (discord.Forbidden, discord.HTTPException):
             LOGGER.debug("channel_id=%s archived employee thread collection failed", parent.id)
         return threads
+
+    async def _clean_non_log_messages(
+        self,
+        channel: discord.abc.MessageableChannel,
+        *,
+        preserve_message_ids: set[int] | None = None,
+    ) -> CleanResult:
+        result = CleanResult()
+        bot_user_id = self.user.id if self.user is not None else None
+        preserve_message_ids = preserve_message_ids or set()
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return result
+
+        async for existing in channel.history(limit=None):
+            result.inspected += 1
+            if existing.id in preserve_message_ids or existing.pinned:
+                result.preserved += 1
+                continue
+            if _is_log_related_message(existing, bot_user_id):
+                result.preserved += 1
+                continue
+            try:
+                await existing.delete()
+                result.deleted += 1
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                result.failed += 1
+        return result
+
+    async def _set_receipt_note(
+        self,
+        receipt_id: str,
+        note: str | None,
+        *,
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> bool:
+        normalized_note = _normalize_receipt_note(note)
+        actor = AuditEventInput(
+            actor_user_id=actor_user_id,
+            actor_display_name=actor_display_name,
+            action="receipt_note_updated",
+            target_receipt_id=receipt_id,
+            detail_json={
+                "has_note": normalized_note is not None,
+                "note": normalized_note,
+            },
+        )
+        updated = await self.base_runtime.database.update_receipt_note(
+            receipt_id,
+            normalized_note,
+            actor,
+        )
+        if not updated:
+            return False
+        receipt = await self.base_runtime.database.get_receipt(receipt_id)
+        if receipt is not None:
+            await self._refresh_posted_receipt_messages(receipt)
+        return True
 
     async def _request_shutdown(
         self,
@@ -4952,6 +5152,88 @@ class BakunawaMechDiscordClient(discord.Client):
             await self._rebuild_receipt_logs(interaction.user, channel, interaction)
 
         @self.tree.command(
+            name="mechclean",
+            description="Clean non-log messages from the current channel or thread.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        async def mechclean(interaction: discord.Interaction[Any]) -> None:
+            channel = interaction.channel
+            if channel is None:
+                await interaction.response.send_message("This interaction is missing a channel context.", ephemeral=True)
+                return
+            if not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot.")),
+                    ephemeral=True,
+                )
+                return
+            if not self._is_scoped_messageable_channel(channel):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel.")),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            result = await self._clean_non_log_messages(channel)
+            await interaction.edit_original_response(
+                embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Clean", _clean_result_description(result)))],
+            )
+
+        @self.tree.command(
+            name="mechnote",
+            description="Add, update, or clear a receipt note.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(
+            receipt_id="Receipt ID to update.",
+            note="New note text. Leave blank to open the note editor; submit blank in the editor to clear.",
+        )
+        async def mechnote(
+            interaction: discord.Interaction[Any],
+            receipt_id: str,
+            note: str | None = None,
+        ) -> None:
+            channel = interaction.channel
+            if channel is None:
+                await interaction.response.send_message("This interaction is missing a channel context.", ephemeral=True)
+                return
+            if not self._is_scoped_messageable_channel(channel):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel.")),
+                    ephemeral=True,
+                )
+                return
+            receipt = await self.base_runtime.database.get_receipt(receipt_id)
+            if receipt is None:
+                await interaction.response.send_message(f"Receipt `{receipt_id}` was not found.", ephemeral=True)
+                return
+            if str(interaction.user.id) != receipt.creator_user_id and not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    "Only the receipt creator or an admin can edit that note.",
+                    ephemeral=True,
+                )
+                return
+            if note is None:
+                await interaction.response.send_modal(ReceiptNoteModal(self, receipt.id, receipt.admin_note))
+                return
+            updated = await self._set_receipt_note(
+                receipt.id,
+                note,
+                actor_user_id=str(interaction.user.id),
+                actor_display_name=getattr(interaction.user, "display_name", interaction.user.name),
+            )
+            if not updated:
+                await interaction.response.send_message(f"Receipt `{receipt.id}` was not found.", ephemeral=True)
+                return
+            status = "cleared" if _normalize_receipt_note(note) is None else "updated"
+            await interaction.response.send_message(
+                f"Receipt `{receipt.id}` note {status}. Matching receipt cards were refreshed.",
+                ephemeral=True,
+            )
+
+        @self.tree.command(
             name="mechrestartbot",
             description="Restart the bot remotely.",
             **command_kwargs,
@@ -5065,6 +5347,47 @@ class BakunawaMechDiscordClient(discord.Client):
             interaction=interaction,
         )
         await self.apply_result(dispatch, result)
+
+
+class ReceiptNoteModal(discord.ui.Modal, title="Receipt Note"):
+    note = discord.ui.TextInput(
+        label="Receipt Note",
+        custom_id="note",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+        placeholder="Example: discounted due to repeat customer / event comp / staff approval.",
+    )
+
+    def __init__(
+        self,
+        client: BakunawaMechDiscordClient,
+        receipt_id: str,
+        current_note: str | None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self._client = client
+        self._receipt_id = receipt_id
+        self.note.default = current_note or ""
+
+    async def on_submit(self, interaction: discord.Interaction[Any]) -> None:
+        updated = await self._client._set_receipt_note(
+            self._receipt_id,
+            str(self.note),
+            actor_user_id=str(interaction.user.id),
+            actor_display_name=getattr(interaction.user, "display_name", interaction.user.name),
+        )
+        if not updated:
+            await interaction.response.send_message(
+                f"Receipt `{self._receipt_id}` was not found.",
+                ephemeral=True,
+            )
+            return
+        status = "cleared" if _normalize_receipt_note(str(self.note)) is None else "updated"
+        await interaction.response.send_message(
+            f"Receipt `{self._receipt_id}` note {status}. Matching receipt cards were refreshed.",
+            ephemeral=True,
+        )
 
 
 class AddItemModal(discord.ui.Modal, title="Add Item"):
@@ -5763,6 +6086,45 @@ async def _send_ephemeral_prompt(
 
 def _is_lifecycle_status_message(message: discord.Message) -> bool:
     return any(embed.title == "Bakunawa Mech Status" for embed in message.embeds)
+
+
+def _is_log_related_message(message: discord.Message, bot_user_id: int | None) -> bool:
+    if bot_user_id is not None and message.author.id != bot_user_id:
+        return False
+    if _is_lifecycle_status_message(message):
+        return True
+    content = message.content or ""
+    if content.startswith("Receipt `") and " saved for " in content:
+        return True
+    return any((embed.title or "").startswith("Bakunawa Mech Receipt ") for embed in message.embeds)
+
+
+def _clean_result_description(result: CleanResult) -> str:
+    return (
+        "Clean complete.\n"
+        f"Messages inspected: {result.inspected}\n"
+        f"Non-log messages deleted: {result.deleted}\n"
+        f"Log/status/pinned messages preserved: {result.preserved}\n"
+        f"Delete failures: {result.failed}"
+    )
+
+
+def _parse_note_command(remainder: str) -> tuple[str, str | None]:
+    tokens = remainder.strip().split(maxsplit=1)
+    if not tokens:
+        raise ValueError("Use `bm!note <receipt_id> <note>`. Use `bm!note <receipt_id> clear` to clear the note.")
+    receipt_id = tokens[0].strip()
+    if len(tokens) == 1:
+        raise ValueError("Add note text after the receipt ID, or use `clear` to remove the current note.")
+    note = _normalize_receipt_note(tokens[1])
+    return receipt_id, note
+
+
+def _normalize_receipt_note(note: str | None) -> str | None:
+    normalized = "\n".join(line.rstrip() for line in (note or "").strip().splitlines()).strip()
+    if not normalized or normalized.lower() in {"clear", "none", "remove", "delete"}:
+        return None
+    return normalized[:4000]
 
 
 def _configured_parent_channel_id(channel: discord.abc.MessageableChannel) -> int:

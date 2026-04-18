@@ -330,6 +330,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}calc [@user]` / `/mechcalc [user]` - Open the upgrade receipt panel\n"
                 f"`{prefix}stats` / `/mechstats` - Show the leaderboard for 1 minute\n"
                 f"`{prefix}pricesheet` / `/mechpricesheet` - Show the current catalog price sheet\n"
+                f"`{prefix}note <receipt_id> <note>` / `/mechnote` - Add or update a receipt note\n"
                 f"`{prefix}help` / `/mechhelp` - Open this paged help panel\n"
                 f"`{prefix}health` / `/mechealth` - Check bot setup and permissions"
             ),
@@ -351,6 +352,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}export` / `/mechexport` - Export the current database as JSON\n"
                 f"`{prefix}import [file] [mode]` / `/mechimport` - Import a reviewed export\n"
                 f"`{prefix}rebuildlogs` / `/mechrebuildlogs` - Rebuild the receipt log channel from the database\n"
+                f"`{prefix}clean` / `/mechclean` - Delete non-log messages from the current channel or thread\n"
                 f"`{prefix}restartbot` / `/mechrestartbot` - Restart the bot remotely\n"
                 f"`{prefix}stop` / `/mechstop` - Shut the bot down gracefully"
             ),
@@ -363,11 +365,11 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
     elif page == 2:
         embed.field(
             "Main Channel Receipt Cards",
-            "`EDIT`, `INVALIDATE`\nAvailable to the receipt creator or admins.",
+            "`EDIT`, `INVALIDATE`, `NOTE`\nAvailable to the receipt creator or admins.",
             False,
         ).field(
             "Admin Or Log Receipt Cards",
-            "`REFRESH`, `MARK PAID`, `MARK UNPAID`, `INVALIDATE`, `RESTORE UNPAID`\nAvailable to admins.",
+            "`REFRESH`, `NOTE`, `MARK PAID`, `MARK UNPAID`, `INVALIDATE`, `RESTORE UNPAID`\nAvailable to admins.",
             False,
         ).field(
             "Receipt Status Rules",
@@ -388,7 +390,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             False,
         ).field(
             "Permissions",
-            "Everyone: `calc`, `stats`, `pricesheet`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `restartbot`, `stop`",
+            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `clean`, `restartbot`, `stop`",
             False,
         )
     return embed.with_footer(f"Page {page + 1}/{HELP_PAGE_COUNT} • Use Prev/Next to browse.")
@@ -897,6 +899,8 @@ def receipt_detail_payload(
     ).with_footer(
         "Active receipts affect payouts. Paid receipts stay in stats only. Invalidated receipts are excluded. Replace Proof keeps the receipt ID."
     )
+    if receipt.admin_note:
+        base_embed.field("Receipt Note", _receipt_note_field_value(receipt.admin_note), False)
     apply_receipt_display_context(base_embed, display)
 
     buttons = [
@@ -912,6 +916,13 @@ def receipt_detail_payload(
             custom_id=f"receipt|proof|{owner_user_id}|{receipt.id}",
             label="Replace Proof",
             style=BUTTON_STYLE_PRIMARY,
+        )
+    )
+    buttons.append(
+        ButtonPayload(
+            custom_id=f"receipt|detail_note|{owner_user_id}|{receipt.id}",
+            label="NOTE",
+            style=BUTTON_STYLE_SECONDARY,
         )
     )
     return ReplyPayload(
@@ -936,6 +947,7 @@ def receipt_main_payload(
         receipt.profit,
         receipt.items,
         display,
+        getattr(receipt, "admin_note", None),
     )
     if getattr(receipt, "status", ReceiptStatus.ACTIVE) is not ReceiptStatus.ACTIVE:
         embed.field("Status", admin_receipt_status_label(receipt.status), True)
@@ -959,6 +971,7 @@ def receipt_log_payload(
         receipt.profit,
         receipt.items,
         display,
+        getattr(receipt, "admin_note", None),
     )
     embed.field("Status", admin_receipt_status_label(receipt.status), True)
     return ReplyPayload(
@@ -981,6 +994,11 @@ def receipt_main_action_buttons(receipt_id: str, creator_user_id: str) -> list[B
             label="INVALIDATE",
             style=BUTTON_STYLE_DANGER,
         ),
+        ButtonPayload(
+            custom_id=f"receipt|note|{creator_user_id}|{receipt_id}",
+            label="NOTE",
+            style=BUTTON_STYLE_SECONDARY,
+        ),
     ]
 
 
@@ -996,6 +1014,13 @@ def receipt_log_action_buttons(
             style=BUTTON_STYLE_SECONDARY,
         )
     ]
+    buttons.append(
+        ButtonPayload(
+            custom_id=f"receipt|log_note|{receipt_id}",
+            label="NOTE",
+            style=BUTTON_STYLE_SECONDARY,
+        )
+    )
     buttons.extend(
         ButtonPayload(
             custom_id=f"receipt|log_status|{receipt_id}|{action[0]}",
@@ -1019,6 +1044,7 @@ def receipt_embed(
     profit: int,
     items: list[PricedItem],
     display: ReceiptDisplayContext | None,
+    admin_note: str | None = None,
 ) -> EmbedPayload:
     creator_username, creator_user_id = creator
     items_text = "\n".join(_receipt_item_lines(items))
@@ -1035,6 +1061,8 @@ def receipt_embed(
         description=description,
         color=THEME_SUCCESS,
     )
+    if admin_note:
+        embed.field("Receipt Note", _receipt_note_field_value(admin_note), False)
     apply_receipt_display_context(embed, display)
     return embed
 
@@ -1059,6 +1087,13 @@ def accounting_policy_label(policy: AccountingPolicy) -> str:
 def payment_proof_field_value(payment_proof_source_url: str | None) -> str:
     urls = [line.strip() for line in (payment_proof_source_url or "").splitlines() if line.strip()]
     return "\n".join(urls) if urls else "No payment proof URL recorded."
+
+
+def _receipt_note_field_value(admin_note: str) -> str:
+    note = admin_note.strip()
+    if len(note) <= 1000:
+        return note
+    return f"{note[:997].rstrip()}..."
 
 
 def proof_preview_embeds(proof_urls: str | None, title_prefix: str) -> list[EmbedPayload]:

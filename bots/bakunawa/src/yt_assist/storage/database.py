@@ -646,6 +646,27 @@ class Database:
         await self._connection.commit()
         return True
 
+    async def update_receipt_note(
+        self,
+        receipt_id: str,
+        admin_note: str | None,
+        actor: AuditEventInput,
+    ) -> bool:
+        cursor = await self._connection.execute(
+            """
+            UPDATE receipts
+            SET admin_note = ?
+            WHERE id = ?
+            """,
+            (admin_note, receipt_id),
+        )
+        if cursor.rowcount == 0:
+            await self._connection.rollback()
+            return False
+        await self._insert_audit_event(actor)
+        await self._connection.commit()
+        return True
+
     async def update_receipt_statuses(
         self,
         receipt_ids: list[str],
