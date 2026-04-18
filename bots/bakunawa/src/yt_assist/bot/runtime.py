@@ -3234,11 +3234,29 @@ class BakunawaMechDiscordClient(discord.Client):
             )
             return
 
+        await interaction.response.send_modal(
+            PackageSpecialPriceModal(self, owner_user_id, package_key, choices, counts)
+        )
+
+    async def _add_package_with_optional_override(
+        self,
+        interaction: discord.Interaction[Any],
+        owner_user_id: int,
+        package_key: str,
+        choices: dict[str, str],
+        counts: dict[str, int],
+        override_unit_price: int | None,
+    ) -> None:
         try:
             expansion = expand_package(
                 self.base_runtime.packages,
                 self.base_runtime.catalog,
-                PackageSelection(package_key=package_key, choices=choices, counts=counts),
+                PackageSelection(
+                    package_key=package_key,
+                    choices=choices,
+                    counts=counts,
+                    override_unit_price=override_unit_price,
+                ),
             )
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
@@ -3251,9 +3269,14 @@ class BakunawaMechDiscordClient(discord.Client):
             await interaction.response.send_message("Calculator session missing.", ephemeral=True)
             return
         notice = f"Added {expansion.display_name}."
+        if override_unit_price is not None:
+            notice += f" Special price applied: ${override_unit_price:,}."
         if expansion.price_pending:
             notice += " Pricing is pending, so this line is currently a placeholder."
-        await self._edit_calc_panel(interaction, session, content=notice)
+        payload = calc_reply_payload(self.base_runtime.catalog.items, session)
+        kwargs = reply_payload_to_spec(self, self.shared_runtime, payload).edit_kwargs()
+        kwargs["content"] = notice
+        await interaction.response.edit_message(**kwargs)
 
     async def _open_package_choice_panel(
         self,
@@ -4943,6 +4966,54 @@ class AddItemModal(discord.ui.Modal, title="Add Item"):
         await interaction.response.edit_message(**spec.edit_kwargs())
 
 
+class PackageSpecialPriceModal(discord.ui.Modal, title="Package Special Pricing"):
+    override_unit_price = discord.ui.TextInput(
+        label="Special Pricing (optional)",
+        custom_id="override_unit_price",
+        required=False,
+        default="",
+    )
+
+    def __init__(
+        self,
+        client: BakunawaMechDiscordClient,
+        owner_user_id: int,
+        package_key: str,
+        choices: dict[str, str],
+        counts: dict[str, int],
+    ) -> None:
+        super().__init__(timeout=300)
+        self._client = client
+        self._owner_user_id = owner_user_id
+        self._package_key = package_key
+        self._choices = dict(choices)
+        self._counts = dict(counts)
+        definition = client.base_runtime.packages.find_package(package_key)
+        if definition is not None:
+            self.title = f"{definition.label} Pricing"
+
+    async def on_submit(self, interaction: discord.Interaction[Any]) -> None:
+        if interaction.user.id != self._owner_user_id:
+            await interaction.response.send_message(
+                "This calculator panel belongs to another user.",
+                ephemeral=True,
+            )
+            return
+        try:
+            override_unit_price = parse_add_item_inputs(str(self.override_unit_price))
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await self._client._add_package_with_optional_override(
+            interaction,
+            self._owner_user_id,
+            self._package_key,
+            self._choices,
+            self._counts,
+            override_unit_price,
+        )
+
+
 class FullCosmeticsModal(discord.ui.Modal, title="Full Cosmetics"):
     cosmetic_parts = discord.ui.TextInput(
         label="Cosmetic Parts count",
@@ -4955,6 +5026,12 @@ class FullCosmeticsModal(discord.ui.Modal, title="Full Cosmetics"):
         custom_id="extras_kit",
         required=True,
         default="0",
+    )
+    override_unit_price = discord.ui.TextInput(
+        label="Special Pricing (optional)",
+        custom_id="override_unit_price",
+        required=False,
+        default="",
     )
 
     def __init__(self, client: BakunawaMechDiscordClient, owner_user_id: int) -> None:
@@ -4974,24 +5051,18 @@ class FullCosmeticsModal(discord.ui.Modal, title="Full Cosmetics"):
                 "cosmetic_parts": _parse_non_negative_count(str(self.cosmetic_parts), "Cosmetic Parts"),
                 "extras_kit": _parse_non_negative_count(str(self.extras_kit), "Extras Kit"),
             }
-            expansion = expand_package(
-                self._client.base_runtime.packages,
-                self._client.base_runtime.catalog,
-                PackageSelection(package_key="full_cosmetics", choices={}, counts=counts),
-            )
+            override_unit_price = parse_add_item_inputs(str(self.override_unit_price))
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
             return
-        session = await self._client.base_runtime.bot_state.update_session(
+        await self._client._add_package_with_optional_override(
+            interaction,
             self._owner_user_id,
-            lambda current: _apply_package_expansion(current, expansion),
+            "full_cosmetics",
+            {},
+            counts,
+            override_unit_price,
         )
-        if session is None:
-            await interaction.response.send_message("Calculator session expired.", ephemeral=True)
-            return
-        payload = calc_reply_payload(self._client.base_runtime.catalog.items, session)
-        spec = reply_payload_to_spec(self._client, self._client.shared_runtime, payload)
-        await interaction.response.edit_message(**spec.edit_kwargs())
 
 
 class ContractAddModal(discord.ui.Modal, title="Add or Update Contract"):

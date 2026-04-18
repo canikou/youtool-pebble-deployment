@@ -100,6 +100,7 @@ class PackageSelection:
     package_key: str
     choices: dict[str, str] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
+    override_unit_price: int | None = None
 
 
 @dataclass(slots=True)
@@ -142,7 +143,7 @@ def expand_package(
         DraftItem(
             item_name=price_catalog_item.name,
             quantity=1,
-            override_unit_price=None,
+            override_unit_price=selection.override_unit_price,
             contract_name=None,
             display_name=display_name,
             package_key=definition.key,
