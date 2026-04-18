@@ -98,6 +98,8 @@ STATUS_REPOST_DEBOUNCE_SECONDS = 5
 STATUS_REPOST_FALLBACK_INTERVAL_SECONDS = 60
 TOPIC_HEARTBEAT_INTERVAL_SECONDS = 600
 LOCAL_STOP_SIGNAL_FILE = "bakunawa-mech.stop"
+CALCULATOR_THREAD_PREFIX = "BM Calc - "
+RECEIPT_LOG_THREAD_PREFIX = "BM Logs - "
 
 
 def _default_config_path(path: Path | None) -> Path:
@@ -830,7 +832,18 @@ class BakunawaMechDiscordClient(discord.Client):
             self._track_task(self._announce_ready())
 
     async def on_interaction(self, interaction: discord.Interaction[Any]) -> None:
-        if interaction.channel_id is not None and not self._is_scoped_channel_id(interaction.channel_id):
+        if interaction.channel is not None and not self._is_scoped_messageable_channel(interaction.channel):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Bakunawa Mech is only enabled in its configured shop channels.",
+                    ephemeral=True,
+                )
+            return
+        if (
+            interaction.channel is None
+            and interaction.channel_id is not None
+            and not self._is_scoped_channel_id(interaction.channel_id)
+        ):
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     "Bakunawa Mech is only enabled in its configured shop channels.",
@@ -866,11 +879,11 @@ class BakunawaMechDiscordClient(discord.Client):
             return
 
         channel_id = message.channel.id
-        if not self._is_scoped_channel_id(channel_id):
+        if not self._is_scoped_messageable_channel(message.channel):
             return
         self._note_channel_activity(message)
-        is_allowed_channel = channel_id in self.base_runtime.config.discord.allowed_channel_ids
-        is_admin_channel = channel_id in self.base_runtime.config.discord.admin_channel_ids
+        is_allowed_channel = self._is_allowed_messageable_channel(message.channel)
+        is_admin_channel = self._is_admin_messageable_channel(message.channel)
 
         if self.base_runtime.config.discord.log_seen_messages and (is_allowed_channel or is_admin_channel):
             LOGGER.debug(
@@ -1351,6 +1364,10 @@ class BakunawaMechDiscordClient(discord.Client):
         config = self.base_runtime.config.discord
         return channel_id in config.allowed_channel_ids or channel_id in config.admin_channel_ids
 
+    def _is_allowed_messageable_channel(self, channel: discord.abc.MessageableChannel) -> bool:
+        channel_id = _configured_parent_channel_id(channel)
+        return self._is_allowed_channel_id(channel_id)
+
     def _is_scoped_channel_id(self, channel_id: int) -> bool:
         config = self.base_runtime.config.discord
         return (
@@ -1359,14 +1376,20 @@ class BakunawaMechDiscordClient(discord.Client):
             or channel_id == config.receipt_log_channel_id
         )
 
+    def _is_scoped_messageable_channel(self, channel: discord.abc.MessageableChannel) -> bool:
+        return self._is_scoped_channel_id(_configured_parent_channel_id(channel))
+
     def _is_admin_channel_id(self, channel_id: int) -> bool:
         return channel_id in self.base_runtime.config.discord.admin_channel_ids
+
+    def _is_admin_messageable_channel(self, channel: discord.abc.MessageableChannel) -> bool:
+        return self._is_admin_channel_id(_configured_parent_channel_id(channel))
 
     def _is_admin_user(self, user_id: int) -> bool:
         return user_id in self.base_runtime.config.discord.admin_user_ids
 
     async def _run_calc_prefix(self, message: discord.Message, remainder: str) -> None:
-        if not self._is_allowed_channel_id(message.channel.id):
+        if not self._is_allowed_messageable_channel(message.channel):
             await message.channel.send(
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel."))]
             )
@@ -1380,9 +1403,20 @@ class BakunawaMechDiscordClient(discord.Client):
             [(item.item_name, item.quantity) for item in prefills],
             remainder,
         )
+        target_channel = await self._resolve_calculator_thread(message.channel, message.author)
+        if target_channel.id != message.channel.id:
+            referral = await message.channel.send(
+                f"<@{message.author.id}> I opened your Bakunawa Mech calculator in {target_channel.mention}."
+            )
+            self._track_task(
+                _safe_delete_message_later(
+                    referral,
+                    self.base_runtime.config.discord.transient_message_timeout_seconds,
+                )
+            )
         await self._start_calc_session(
             actor=message.author,
-            channel=message.channel,
+            channel=target_channel,
             target_user_id=target_user_id,
             prefilled_items=prefills,
             prefix_message=message,
@@ -1511,7 +1545,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot."))]
             )
             return
-        if not self._is_admin_channel_id(message.channel.id):
+        if not self._is_admin_messageable_channel(message.channel):
             await message.channel.send(
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel."))]
             )
@@ -1543,6 +1577,77 @@ class BakunawaMechDiscordClient(discord.Client):
             )
             return
         await self._request_shutdown(message.author, message.channel, restart=False, prefix_message=message)
+
+    async def _resolve_calculator_thread(
+        self,
+        channel: discord.abc.MessageableChannel,
+        actor: discord.abc.User,
+    ) -> discord.abc.MessageableChannel:
+        if isinstance(channel, discord.Thread):
+            if _thread_matches_employee(channel, CALCULATOR_THREAD_PREFIX, actor.id):
+                await _ensure_thread_open(channel)
+                return channel
+            parent = channel.parent
+            if isinstance(parent, discord.TextChannel):
+                return await self._get_or_create_employee_thread(
+                    parent,
+                    CALCULATOR_THREAD_PREFIX,
+                    actor.id,
+                    getattr(actor, "display_name", actor.name),
+                )
+            return channel
+        if isinstance(channel, discord.TextChannel):
+            return await self._get_or_create_employee_thread(
+                channel,
+                CALCULATOR_THREAD_PREFIX,
+                actor.id,
+                getattr(actor, "display_name", actor.name),
+            )
+        return channel
+
+    async def _get_or_create_employee_thread(
+        self,
+        parent: discord.TextChannel,
+        prefix: str,
+        user_id: int | str,
+        display_name: str,
+    ) -> discord.Thread:
+        user_id_text = str(user_id)
+        for thread in parent.threads:
+            if _thread_matches_employee(thread, prefix, user_id_text):
+                await _ensure_thread_open(thread)
+                return thread
+
+        try:
+            async for thread in parent.archived_threads(limit=None):
+                if _thread_matches_employee(thread, prefix, user_id_text):
+                    await _ensure_thread_open(thread)
+                    return thread
+        except (discord.Forbidden, discord.HTTPException):
+            LOGGER.debug("channel_id=%s archived thread lookup failed for prefix=%s user_id=%s", parent.id, prefix, user_id_text)
+
+        return await parent.create_thread(
+            name=_employee_thread_name(prefix, display_name, user_id_text),
+            type=discord.ChannelType.public_thread,
+            auto_archive_duration=getattr(parent, "default_auto_archive_duration", 1440) or 1440,
+            reason="Bakunawa Mech employee thread",
+        )
+
+    async def _resolve_receipt_log_thread(self, receipt) -> discord.abc.MessageableChannel | None:
+        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
+        if log_channel_id is None:
+            return None
+        log_channel = self.get_channel(log_channel_id) or await self.fetch_channel(log_channel_id)
+        if isinstance(log_channel, discord.TextChannel):
+            return await self._get_or_create_employee_thread(
+                log_channel,
+                RECEIPT_LOG_THREAD_PREFIX,
+                receipt.creator_user_id,
+                receipt.creator_display_name or receipt.creator_username,
+            )
+        if isinstance(log_channel, discord.abc.Messageable):
+            return log_channel
+        return None
 
     async def _start_calc_session(
         self,
@@ -1602,16 +1707,21 @@ class BakunawaMechDiscordClient(discord.Client):
             channel_object=channel,
             is_interaction=interaction is not None,
             invocation_message=prefix_message,
-            interaction=interaction,
+            interaction=interaction if interaction is None or interaction.channel_id == channel.id else None,
         )
         await self._send_reply(dispatch, payload)
+        if interaction is not None and interaction.channel_id != channel.id:
+            await interaction.response.send_message(
+                f"I opened your Bakunawa Mech calculator in {channel.mention}.",
+                ephemeral=True,
+            )
         if dispatch.reply_message is not None:
             await self.base_runtime.bot_state.set_panel_message(
                 actor.id,
                 dispatch.reply_message.channel.id,
                 dispatch.reply_message.id,
             )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
     def _resolve_calc_credit_target(
@@ -1771,26 +1881,35 @@ class BakunawaMechDiscordClient(discord.Client):
         main_required = [
             ("view_channel", "View Channel"),
             ("send_messages", "Send Messages"),
+            ("send_messages_in_threads", "Send Messages in Threads"),
+            ("create_public_threads", "Create Public Threads"),
             ("embed_links", "Embed Links"),
             ("attach_files", "Attach Files"),
             ("read_message_history", "Read Message History"),
             ("manage_messages", "Manage Messages"),
             ("manage_channels", "Manage Channels"),
+            ("manage_threads", "Manage Threads"),
         ]
         admin_required = [
             ("view_channel", "View Channel"),
             ("send_messages", "Send Messages"),
+            ("send_messages_in_threads", "Send Messages in Threads"),
+            ("create_public_threads", "Create Public Threads"),
             ("embed_links", "Embed Links"),
             ("attach_files", "Attach Files"),
             ("read_message_history", "Read Message History"),
             ("manage_channels", "Manage Channels"),
+            ("manage_threads", "Manage Threads"),
         ]
         log_required = [
             ("view_channel", "View Channel"),
             ("send_messages", "Send Messages"),
+            ("send_messages_in_threads", "Send Messages in Threads"),
+            ("create_public_threads", "Create Public Threads"),
             ("embed_links", "Embed Links"),
             ("attach_files", "Attach Files"),
             ("read_message_history", "Read Message History"),
+            ("manage_threads", "Manage Threads"),
         ]
 
         for channel_id in config.allowed_channel_ids:
@@ -2488,7 +2607,7 @@ class BakunawaMechDiscordClient(discord.Client):
             await dispatch.reply_message.edit(
                 view=self._build_adjustprices_view(actor.id, self.base_runtime.catalog.items)
             )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
     async def _send_reset_confirmation(
@@ -2533,7 +2652,7 @@ class BakunawaMechDiscordClient(discord.Client):
         if dispatch.reply_message is not None:
             async with self._pending_lock:
                 self._pending_resets[actor.id] = PendingReset(mode=mode, user_ids=list(user_ids))
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
     async def _start_import_prompt(
@@ -3034,6 +3153,18 @@ class BakunawaMechDiscordClient(discord.Client):
                     deleted_messages += 1
                 except discord.HTTPException:
                     delete_failures += 1
+            log_threads = await self._collect_employee_threads(log_channel, RECEIPT_LOG_THREAD_PREFIX)
+            for thread in log_threads:
+                await _ensure_thread_open(thread)
+                async for existing in thread.history(limit=None):
+                    inspected_messages += 1
+                    if existing.author.id != bot_user.id:
+                        continue
+                    try:
+                        await existing.delete()
+                        deleted_messages += 1
+                    except discord.HTTPException:
+                        delete_failures += 1
         if dispatch.reply_message is not None:
             await dispatch.reply_message.edit(
                 embeds=[
@@ -3041,7 +3172,7 @@ class BakunawaMechDiscordClient(discord.Client):
                         task_status_embed(
                             "Bakunawa Mech Rebuild Logs",
                             (
-                                f"Rebuilding receipt log channel <#{log_channel_id}> from the database. "
+                                f"Rebuilding receipt log channel <#{log_channel_id}> into employee threads from the database. "
                                 f"Reposting {len(receipts)} receipt(s) now..."
                             ),
                         )
@@ -3055,7 +3186,15 @@ class BakunawaMechDiscordClient(discord.Client):
             payload = receipt_log_payload(receipt, display)
             spec = reply_payload_to_spec(self, self.shared_runtime, payload)
             try:
-                await log_channel.send(**spec.send_kwargs())
+                target_log_channel = log_channel
+                if isinstance(log_channel, discord.TextChannel):
+                    target_log_channel = await self._get_or_create_employee_thread(
+                        log_channel,
+                        RECEIPT_LOG_THREAD_PREFIX,
+                        receipt.creator_user_id,
+                        receipt.creator_display_name or receipt.creator_username,
+                    )
+                await target_log_channel.send(**spec.send_kwargs())
                 reposted_receipts += 1
             except discord.HTTPException:
                 repost_failures += 1
@@ -3068,6 +3207,7 @@ class BakunawaMechDiscordClient(discord.Client):
                             (
                                 f"Receipt log rebuild finished for <#{log_channel_id}>.\n"
                                 f"Receipts replayed: {reposted_receipts}\n"
+                                "Log destination: employee threads\n"
                                 f"Existing bot log messages deleted: {deleted_messages}\n"
                                 f"Delete failures: {delete_failures}\n"
                                 f"Repost failures: {repost_failures}\n"
@@ -3088,6 +3228,25 @@ class BakunawaMechDiscordClient(discord.Client):
             repost_failures,
             inspected_messages,
         )
+
+    async def _collect_employee_threads(
+        self,
+        parent: discord.TextChannel,
+        prefix: str,
+    ) -> list[discord.Thread]:
+        threads: list[discord.Thread] = [
+            thread for thread in parent.threads if thread.name.startswith(prefix)
+        ]
+        seen_ids = {thread.id for thread in threads}
+        try:
+            async for thread in parent.archived_threads(limit=None):
+                if thread.id in seen_ids or not thread.name.startswith(prefix):
+                    continue
+                threads.append(thread)
+                seen_ids.add(thread.id)
+        except (discord.Forbidden, discord.HTTPException):
+            LOGGER.debug("channel_id=%s archived employee thread collection failed", parent.id)
+        return threads
 
     async def _request_shutdown(
         self,
@@ -4110,14 +4269,14 @@ class BakunawaMechDiscordClient(discord.Client):
         display = await self._load_receipt_display_context(receipt.id, receipt.creator_user_id)
         main_channel_id = int(receipt.channel_id)
         main_channel = self.get_channel(main_channel_id)
-        if not isinstance(main_channel, discord.TextChannel):
+        if not isinstance(main_channel, (discord.TextChannel, discord.Thread)):
             try:
                 fetched_main = await self.fetch_channel(main_channel_id)
             except discord.HTTPException:
                 fetched_main = None
-            if isinstance(fetched_main, discord.TextChannel):
+            if isinstance(fetched_main, (discord.TextChannel, discord.Thread)):
                 main_channel = fetched_main
-        if isinstance(main_channel, discord.TextChannel):
+        if isinstance(main_channel, (discord.TextChannel, discord.Thread)):
             main_payload = receipt_main_payload(receipt, display)
             await self._refresh_matching_receipt_messages_in_channel(
                 main_channel,
@@ -4128,25 +4287,34 @@ class BakunawaMechDiscordClient(discord.Client):
         log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
         if log_channel_id is None or log_channel_id == main_channel_id:
             return
-        log_channel = self.get_channel(log_channel_id)
-        if not isinstance(log_channel, discord.TextChannel):
-            try:
-                fetched_log = await self.fetch_channel(log_channel_id)
-            except discord.HTTPException:
-                fetched_log = None
-            if isinstance(fetched_log, discord.TextChannel):
-                log_channel = fetched_log
-        if isinstance(log_channel, discord.TextChannel):
+        log_channel = await self._resolve_receipt_log_thread(receipt)
+        if log_channel is not None:
             log_payload = receipt_log_payload(receipt, display)
             await self._refresh_matching_receipt_messages_in_channel(
                 log_channel,
                 receipt.id,
                 log_payload,
             )
+            return
+        log_parent_channel = self.get_channel(log_channel_id)
+        if not isinstance(log_parent_channel, discord.TextChannel):
+            try:
+                fetched_log = await self.fetch_channel(log_channel_id)
+            except discord.HTTPException:
+                fetched_log = None
+            if isinstance(fetched_log, discord.TextChannel):
+                log_parent_channel = fetched_log
+        if isinstance(log_parent_channel, discord.TextChannel):
+            log_payload = receipt_log_payload(receipt, display)
+            await self._refresh_matching_receipt_messages_in_channel(
+                log_parent_channel,
+                receipt.id,
+                log_payload,
+            )
 
     async def _refresh_matching_receipt_messages_in_channel(
         self,
-        channel: discord.TextChannel,
+        channel: discord.TextChannel | discord.Thread,
         receipt_id: str,
         payload: ReplyPayload,
     ) -> None:
@@ -4287,10 +4455,9 @@ class BakunawaMechDiscordClient(discord.Client):
         main_payload = receipt_main_payload(receipt, display)
         main_spec = reply_payload_to_spec(self, self.shared_runtime, main_payload)
         await main_channel.send(**main_spec.send_kwargs())
-        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
-        if log_channel_id is None or log_channel_id == main_channel_id:
+        log_channel = await self._resolve_receipt_log_thread(receipt)
+        if log_channel is None or log_channel.id == main_channel_id:
             return
-        log_channel = self.get_channel(log_channel_id) or await self.fetch_channel(log_channel_id)
         log_payload = receipt_log_payload(receipt, display)
         log_spec = reply_payload_to_spec(self, self.shared_runtime, log_payload)
         await log_channel.send(**log_spec.send_kwargs())
@@ -4540,16 +4707,17 @@ class BakunawaMechDiscordClient(discord.Client):
             if channel is None:
                 await interaction.response.send_message("This interaction is missing a channel context.", ephemeral=True)
                 return
-            if not self._is_allowed_channel_id(channel.id):
+            if not self._is_allowed_messageable_channel(channel):
                 await interaction.response.send_message(
                     embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel.")),
                     ephemeral=True,
                 )
                 return
             prefilled_items = parse_calc_prefix_input(self.base_runtime.catalog, items or "")[1]
+            target_channel = await self._resolve_calculator_thread(channel, interaction.user)
             await self._start_calc_session(
                 actor=interaction.user,
-                channel=channel,
+                channel=target_channel,
                 target_user_id=user.id if user is not None else None,
                 prefilled_items=prefilled_items,
                 interaction=interaction,
@@ -4572,7 +4740,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     ephemeral=True,
                 )
                 return
-            if not self._is_admin_channel_id(channel.id):
+            if not self._is_admin_messageable_channel(channel):
                 await interaction.response.send_message(
                     embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel.")),
                     ephemeral=True,
@@ -4660,7 +4828,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     ephemeral=True,
                 )
                 return
-            if not self._is_admin_channel_id(channel.id):
+            if not self._is_admin_messageable_channel(channel):
                 await interaction.response.send_message(
                     embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel.")),
                     ephemeral=True,
@@ -4775,7 +4943,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     ephemeral=True,
                 )
                 return
-            if not self._is_admin_channel_id(channel.id):
+            if not self._is_admin_messageable_channel(channel):
                 await interaction.response.send_message(
                     embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel.")),
                     ephemeral=True,
@@ -5595,6 +5763,45 @@ async def _send_ephemeral_prompt(
 
 def _is_lifecycle_status_message(message: discord.Message) -> bool:
     return any(embed.title == "Bakunawa Mech Status" for embed in message.embeds)
+
+
+def _configured_parent_channel_id(channel: discord.abc.MessageableChannel) -> int:
+    if isinstance(channel, discord.Thread) and channel.parent_id is not None:
+        return channel.parent_id
+    return channel.id
+
+
+async def _ensure_thread_open(thread: discord.Thread) -> None:
+    if not thread.archived and not thread.locked:
+        return
+    try:
+        kwargs: dict[str, Any] = {}
+        if thread.archived:
+            kwargs["archived"] = False
+        if thread.locked:
+            kwargs["locked"] = False
+        if kwargs:
+            await thread.edit(**kwargs)
+    except discord.HTTPException:
+        LOGGER.debug("thread_id=%s failed to reopen employee thread", thread.id)
+
+
+def _employee_thread_name(prefix: str, display_name: str, user_id: int | str) -> str:
+    suffix = f"[{user_id}]"
+    cleaned = _clean_thread_display_name(display_name)
+    base = f"{prefix}{cleaned} "
+    max_base_length = max(0, 100 - len(suffix) - 1)
+    return f"{base[:max_base_length].rstrip()} {suffix}".strip()
+
+
+def _thread_matches_employee(thread: discord.Thread, prefix: str, user_id: int | str) -> bool:
+    name = thread.name.strip()
+    return name.startswith(prefix) and name.endswith(f"[{user_id}]")
+
+
+def _clean_thread_display_name(display_name: str) -> str:
+    cleaned = " ".join(display_name.replace("[", "(").replace("]", ")").split())
+    return cleaned or "Employee"
 
 
 def _strip_heartbeat_suffix(topic: str) -> str:
