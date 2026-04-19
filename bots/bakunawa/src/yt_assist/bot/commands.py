@@ -16,13 +16,9 @@ from yt_assist.domain.templates import (
     TemplateLoadStatus,
 )
 from yt_assist.domain.templates import (
-    current as current_templates,
-)
-from yt_assist.domain.templates import (
     reload as reload_templates,
 )
 
-from .command_support import format_template_command_output
 from .render import (
     ReplyPayload,
     health_embed,
@@ -37,6 +33,7 @@ from .render import (
 )
 
 LOGGER = logging.getLogger(__name__)
+TEMPLATES_CHANNEL_ID = 1494151323526889633
 HANDLED_USER_ERROR = "__handled_user_error__"
 
 
@@ -313,22 +310,22 @@ async def _handle_refresh(ctx: CommandContext, args: list[str]) -> CommandResult
 
 
 async def _handle_templates(ctx: CommandContext, args: list[str]) -> CommandResult:
-    await _ensure_admin(ctx)
     await _ensure_allowed_channel(ctx)
     action = args[0].strip().lower() if args else None
     if action == "reload":
+        await _ensure_admin(ctx)
         await _ensure_admin_channel(ctx)
         report = reload_templates()
         if report.status is TemplateLoadStatus.LOADED:
             description = (
                 f"Templates reloaded from `{report.path}`.\n"
-                f"Run `{ctx.prefix}templates` to inspect the live commands."
+                f"Run `{ctx.prefix}templates` to open the templates channel."
             )
             embed = task_status_embed("Bakunawa Mech Templates", description)
         elif report.status is TemplateLoadStatus.CREATED_DEFAULT_FILE:
             description = (
                 f"Templates file was missing, so a default file was created at `{report.path}`.\n"
-                f"Run `{ctx.prefix}templates` to inspect the live commands."
+                f"Run `{ctx.prefix}templates` to open the templates channel."
             )
             embed = task_status_embed("Bakunawa Mech Templates", description)
         else:
@@ -360,19 +357,13 @@ async def _handle_templates(ctx: CommandContext, args: list[str]) -> CommandResu
         result.events.extend(_schedule_transient_cleanup_events(ctx))
         raise _handled(result)
 
-    templates = current_templates()
-    if templates is None:
-        raise RuntimeError("templates are not initialized")
     admin_channel = ctx.is_admin_channel()
     reply = ReplyPayload(
-        content=format_template_command_output(templates),
+        content=f"Current Bakunawa Mech templates are maintained in <#{TEMPLATES_CHANNEL_ID}>.",
         embeds=[
             task_status_embed(
                 "Bakunawa Mech Templates",
-                (
-                    f"Live templates from `{ctx.runtime.config.storage.templates_path}`.\n"
-                    f"Edit the JSON file, then run `{ctx.prefix}templates reload` to refresh without recompiling."
-                ),
+                f"Open <#{TEMPLATES_CHANNEL_ID}> for the current announcement templates.",
             )
         ],
         ephemeral=ctx.is_interaction and admin_channel,
