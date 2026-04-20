@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shlex
 import time
 from dataclasses import dataclass
@@ -100,6 +101,7 @@ TOPIC_HEARTBEAT_INTERVAL_SECONDS = 600
 LOCAL_STOP_SIGNAL_FILE = "bakunawa-mech.stop"
 CALCULATOR_THREAD_PREFIX = "BM Calc - "
 RECEIPT_LOG_THREAD_PREFIX = "BM Logs - "
+MAINTENANCE_WRITE_DELAY_SECONDS = 0.35
 
 
 def _default_config_path(path: Path | None) -> Path:
@@ -131,6 +133,7 @@ class DiscordReplySpec:
     embeds: list[discord.Embed]
     view: discord.ui.View | None
     ephemeral: bool
+    attachment_paths: list[str]
 
     def send_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -140,14 +143,21 @@ class DiscordReplySpec:
             kwargs["embeds"] = self.embeds
         if self.view is not None:
             kwargs["view"] = self.view
+        files = _discord_files_from_paths(self.attachment_paths)
+        if files:
+            kwargs["files"] = files
         return kwargs
 
     def edit_kwargs(self) -> dict[str, Any]:
-        return {
+        kwargs: dict[str, Any] = {
             "content": self.content,
             "embeds": self.embeds,
             "view": self.view,
         }
+        files = _discord_files_from_paths(self.attachment_paths)
+        if files:
+            kwargs["attachments"] = files
+        return kwargs
 
 
 @dataclass(slots=True)
@@ -167,6 +177,19 @@ class CleanResult:
     deleted: int = 0
     preserved: int = 0
     failed: int = 0
+
+
+@dataclass(slots=True)
+class ProofPreviewRepairResult:
+    receipts_checked: int = 0
+    receipts_with_proofs: int = 0
+    receipts_with_local_proofs: int = 0
+    receipts_missing_local_proofs: int = 0
+    channels_scanned: int = 0
+    messages_inspected: int = 0
+    messages_refreshed: int = 0
+    refresh_failures: int = 0
+    channel_failures: int = 0
 
 
 class ResetMode(str, Enum):
@@ -706,6 +729,16 @@ def view_from_payload(
     return PayloadView(client, runtime, payload)
 
 
+def _discord_files_from_paths(paths: list[str]) -> list[discord.File]:
+    files: list[discord.File] = []
+    for raw_path in paths[:10]:
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        files.append(discord.File(path, filename=path.name))
+    return files
+
+
 def reply_payload_to_spec(
     client: BakunawaMechDiscordClient,
     runtime: DiscordRuntimeFacade,
@@ -716,6 +749,7 @@ def reply_payload_to_spec(
         embeds=[embed_from_payload(embed) for embed in payload.embeds],
         view=view_from_payload(client, runtime, payload),
         ephemeral=payload.ephemeral,
+        attachment_paths=list(payload.attachment_paths),
     )
 
 
@@ -933,6 +967,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 return
             if command_name == "rebuildlogs":
                 await self._run_rebuild_logs_prefix(message)
+                return
+            if command_name in {"fixpreviews", "repairpreviews"}:
+                await self._run_fix_previews_prefix(message)
                 return
             if command_name == "clean":
                 await self._run_clean_prefix(message)
@@ -1565,6 +1602,19 @@ class BakunawaMechDiscordClient(discord.Client):
             )
             return
         await self._rebuild_receipt_logs(message.author, message.channel, prefix_message=message)
+
+    async def _run_fix_previews_prefix(self, message: discord.Message) -> None:
+        if not self._is_admin_user(message.author.id):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot."))]
+            )
+            return
+        if not self._is_admin_messageable_channel(message.channel):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel."))]
+            )
+            return
+        await self._repair_proof_previews(message.author, message.channel, prefix_message=message)
 
     async def _run_clean_prefix(self, message: discord.Message) -> None:
         if not self._is_admin_user(message.author.id):
@@ -3295,6 +3345,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     deleted_messages += 1
                 except discord.HTTPException:
                     delete_failures += 1
+                await _maintenance_write_pause()
             log_threads = await self._collect_employee_threads(log_channel, RECEIPT_LOG_THREAD_PREFIX)
             for thread in log_threads:
                 await _ensure_thread_open(thread)
@@ -3307,6 +3358,7 @@ class BakunawaMechDiscordClient(discord.Client):
                         deleted_messages += 1
                     except discord.HTTPException:
                         delete_failures += 1
+                    await _maintenance_write_pause()
         if dispatch.reply_message is not None:
             await dispatch.reply_message.edit(
                 embeds=[
@@ -3340,6 +3392,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 reposted_receipts += 1
             except discord.HTTPException:
                 repost_failures += 1
+            await _maintenance_write_pause()
         if dispatch.reply_message is not None:
             await dispatch.reply_message.edit(
                 embeds=[
@@ -3370,6 +3423,188 @@ class BakunawaMechDiscordClient(discord.Client):
             repost_failures,
             inspected_messages,
         )
+
+    async def _repair_proof_previews(
+        self,
+        actor: discord.abc.User,
+        channel: discord.abc.MessageableChannel,
+        interaction: discord.Interaction[Any] | None = None,
+        prefix_message: discord.Message | None = None,
+    ) -> None:
+        progress_payload = ReplyPayload(
+            embeds=[
+                task_status_embed(
+                    "Bakunawa Mech Fix Previews",
+                    "Scanning saved receipts and scoped employee threads for proof preview cards...",
+                )
+            ],
+            ephemeral=interaction is not None,
+        )
+        dispatch = DiscordDispatchContext(
+            actor=_actor_from_user(actor),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
+            channel_object=channel,
+            is_interaction=interaction is not None,
+            interaction=interaction,
+            invocation_message=prefix_message,
+        )
+        await self._send_reply(dispatch, progress_payload)
+        if prefix_message is not None and not self._is_admin_channel_id(_configured_parent_channel_id(prefix_message.channel)):
+            await _safe_delete_message(prefix_message)
+
+        receipts = await self.base_runtime.database.list_all_receipts()
+        result = ProofPreviewRepairResult(receipts_checked=len(receipts))
+        repairable_receipts = {}
+        for receipt in receipts:
+            if not split_proof_values(receipt.payment_proof_path) and not split_proof_values(receipt.payment_proof_source_url):
+                continue
+            result.receipts_with_proofs += 1
+            if _has_existing_local_proof_path(receipt.payment_proof_path):
+                repairable_receipts[receipt.id] = receipt
+                result.receipts_with_local_proofs += 1
+            else:
+                result.receipts_missing_local_proofs += 1
+
+        channels, channel_failures = await self._collect_proof_preview_repair_channels(receipts, channel)
+        result.channel_failures += channel_failures
+        result.channels_scanned = len(channels)
+        if dispatch.reply_message is not None:
+            await dispatch.reply_message.edit(
+                embeds=[
+                    embed_from_payload(
+                        task_status_embed(
+                            "Bakunawa Mech Fix Previews",
+                            (
+                                f"Scanning {result.channels_scanned} channel/thread(s).\n"
+                                f"Receipts with local saved proofs: {result.receipts_with_local_proofs}\n"
+                                "Repairing old CDN-link proof previews at a Discord-safe pace..."
+                            ),
+                        )
+                    )
+                ],
+                view=None,
+            )
+
+        display_cache: dict[str, ReceiptDisplayContext | None] = {}
+        bot_user_id = self.user.id if self.user is not None else None
+        for target_channel in channels:
+            try:
+                async for message in target_channel.history(limit=None):
+                    result.messages_inspected += 1
+                    receipt_id = _receipt_id_from_message(message)
+                    if receipt_id is None or receipt_id not in repairable_receipts:
+                        continue
+                    if not _is_matching_receipt_message(message, receipt_id, bot_user_id):
+                        continue
+                    if _receipt_message_has_attachment_preview(message):
+                        continue
+
+                    receipt = repairable_receipts[receipt_id]
+                    if receipt_id not in display_cache:
+                        display_cache[receipt_id] = await self._load_receipt_display_context(
+                            receipt.id,
+                            receipt.creator_user_id,
+                        )
+                    display = display_cache[receipt_id]
+                    payload = (
+                        receipt_log_payload(receipt, display)
+                        if self._is_receipt_log_messageable_channel(target_channel)
+                        else receipt_main_payload(receipt, display)
+                    )
+                    spec = reply_payload_to_spec(self, self.shared_runtime, payload)
+                    try:
+                        await message.edit(**spec.edit_kwargs())
+                        result.messages_refreshed += 1
+                    except (discord.HTTPException, discord.NotFound):
+                        result.refresh_failures += 1
+                    await _maintenance_write_pause()
+            except (discord.Forbidden, discord.HTTPException):
+                result.channel_failures += 1
+
+        if dispatch.reply_message is not None:
+            await dispatch.reply_message.edit(
+                embeds=[
+                    embed_from_payload(
+                        task_status_embed(
+                            "Bakunawa Mech Fix Previews",
+                            _proof_preview_repair_result_description(result),
+                        )
+                    )
+                ],
+                view=None,
+            )
+        LOGGER.info(
+            "receipts_checked=%s receipts_with_proofs=%s local_proof_receipts=%s channels_scanned=%s messages_inspected=%s messages_refreshed=%s refresh_failures=%s channel_failures=%s proof previews repaired",
+            result.receipts_checked,
+            result.receipts_with_proofs,
+            result.receipts_with_local_proofs,
+            result.channels_scanned,
+            result.messages_inspected,
+            result.messages_refreshed,
+            result.refresh_failures,
+            result.channel_failures,
+        )
+
+    async def _collect_proof_preview_repair_channels(
+        self,
+        receipts,
+        invocation_channel: discord.abc.MessageableChannel,
+    ) -> tuple[list[discord.TextChannel | discord.Thread], int]:
+        channels: dict[int, discord.TextChannel | discord.Thread] = {}
+        failures = 0
+
+        async def add_channel_id(channel_id: int) -> None:
+            nonlocal failures
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(channel_id)
+                except (discord.Forbidden, discord.HTTPException):
+                    failures += 1
+                    return
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                channels[channel.id] = channel
+
+        if isinstance(invocation_channel, (discord.TextChannel, discord.Thread)):
+            channels[invocation_channel.id] = invocation_channel
+
+        for configured_id in [
+            *self.base_runtime.config.discord.allowed_channel_ids,
+            *self.base_runtime.config.discord.admin_channel_ids,
+        ]:
+            if configured_id > 0:
+                await add_channel_id(configured_id)
+
+        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
+        if log_channel_id is not None and log_channel_id > 0:
+            await add_channel_id(log_channel_id)
+
+        for receipt in receipts:
+            try:
+                await add_channel_id(int(receipt.channel_id))
+            except (TypeError, ValueError):
+                failures += 1
+
+        parent_channels = [channel for channel in channels.values() if isinstance(channel, discord.TextChannel)]
+        for parent in parent_channels:
+            prefixes = []
+            if parent.id in self.base_runtime.config.discord.allowed_channel_ids:
+                prefixes.append(CALCULATOR_THREAD_PREFIX)
+            if parent.id in self.base_runtime.config.discord.admin_channel_ids:
+                prefixes.append(CALCULATOR_THREAD_PREFIX)
+            if parent.id == log_channel_id:
+                prefixes.append(RECEIPT_LOG_THREAD_PREFIX)
+            for prefix in prefixes:
+                for thread in await self._collect_employee_threads(parent, prefix):
+                    channels[thread.id] = thread
+
+        return list(channels.values()), failures
+
+    def _is_receipt_log_messageable_channel(self, channel: discord.abc.MessageableChannel) -> bool:
+        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
+        if log_channel_id is None:
+            return False
+        return _configured_parent_channel_id(channel) == log_channel_id
 
     async def _collect_employee_threads(
         self,
@@ -5147,6 +5382,31 @@ class BakunawaMechDiscordClient(discord.Client):
             await self._rebuild_receipt_logs(interaction.user, channel, interaction)
 
         @self.tree.command(
+            name="mechfixpreviews",
+            description="Repair old receipt proof previews using saved proof attachments.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        async def mechfixpreviews(interaction: discord.Interaction[Any]) -> None:
+            channel = interaction.channel
+            if channel is None:
+                await interaction.response.send_message("This interaction is missing a channel context.", ephemeral=True)
+                return
+            if not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot.")),
+                    ephemeral=True,
+                )
+                return
+            if not self._is_admin_messageable_channel(channel):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel.")),
+                    ephemeral=True,
+                )
+                return
+            await self._repair_proof_previews(interaction.user, channel, interaction)
+
+        @self.tree.command(
             name="mechclean",
             description="Clean non-log messages from the current channel or thread.",
             **command_kwargs,
@@ -6005,6 +6265,11 @@ async def _send_ephemeral_prompt(
     return await interaction.original_response()
 
 
+async def _maintenance_write_pause() -> None:
+    if MAINTENANCE_WRITE_DELAY_SECONDS > 0:
+        await asyncio.sleep(MAINTENANCE_WRITE_DELAY_SECONDS)
+
+
 def _is_lifecycle_status_message(message: discord.Message) -> bool:
     return any(embed.title == "Bakunawa Mech Status" for embed in message.embeds)
 
@@ -6028,6 +6293,50 @@ def _clean_result_description(result: CleanResult) -> str:
         f"Log/status/pinned messages preserved: {result.preserved}\n"
         f"Delete failures: {result.failed}"
     )
+
+
+def _proof_preview_repair_result_description(result: ProofPreviewRepairResult) -> str:
+    return (
+        "Proof preview repair complete.\n"
+        f"Receipts checked: {result.receipts_checked}\n"
+        f"Receipts with proof records: {result.receipts_with_proofs}\n"
+        f"Receipts with saved local proofs: {result.receipts_with_local_proofs}\n"
+        f"Receipts missing saved local proofs: {result.receipts_missing_local_proofs}\n"
+        f"Channels/threads scanned: {result.channels_scanned}\n"
+        f"Messages inspected: {result.messages_inspected}\n"
+        f"Receipt cards refreshed: {result.messages_refreshed}\n"
+        f"Refresh failures: {result.refresh_failures}\n"
+        f"Channel scan failures: {result.channel_failures}"
+    )
+
+
+def _has_existing_local_proof_path(proof_path: str | None) -> bool:
+    return any(Path(value).is_file() for value in split_proof_values(proof_path))
+
+
+RECEIPT_CONTENT_PATTERN = re.compile(r"Receipt `(?P<receipt_id>BM-[^`]+)`")
+RECEIPT_TITLE_PATTERN = re.compile(r"^Bakunawa Mech Receipt (?P<receipt_id>BM-\S+)")
+
+
+def _receipt_id_from_message(message: discord.Message) -> str | None:
+    content_match = RECEIPT_CONTENT_PATTERN.search(message.content or "")
+    if content_match is not None:
+        return content_match.group("receipt_id")
+    for embed in message.embeds:
+        title = embed.title or ""
+        title_match = RECEIPT_TITLE_PATTERN.search(title)
+        if title_match is not None:
+            return title_match.group("receipt_id")
+    return None
+
+
+def _receipt_message_has_attachment_preview(message: discord.Message) -> bool:
+    for embed in message.embeds:
+        image = getattr(embed, "image", None)
+        image_url = getattr(image, "url", None)
+        if isinstance(image_url, str) and image_url.startswith("attachment://"):
+            return True
+    return False
 
 
 def _parse_note_command(remainder: str) -> tuple[str, str | None]:

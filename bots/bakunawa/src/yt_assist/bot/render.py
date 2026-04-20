@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from yt_assist.domain.catalog import CatalogItem
@@ -17,6 +18,7 @@ from yt_assist.domain.models import (
     ReceiptSummary,
     StatsSort,
 )
+from yt_assist.domain.proof import split_proof_values
 
 RECEIPTS_PER_PAGE = 10
 THEME_SUCCESS = 0x2BA17E
@@ -166,6 +168,7 @@ class ReplyPayload:
     embeds: list[EmbedPayload] = field(default_factory=list)
     components: list[ActionRowPayload] = field(default_factory=list)
     ephemeral: bool = False
+    attachment_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"ephemeral": self.ephemeral}
@@ -175,6 +178,8 @@ class ReplyPayload:
             payload["embeds"] = [embed.to_dict() for embed in self.embeds]
         if self.components:
             payload["components"] = [row.to_dict() for row in self.components]
+        if self.attachment_paths:
+            payload["attachment_paths"] = list(self.attachment_paths)
         return payload
 
 
@@ -352,6 +357,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}export` / `/mechexport` - Export the current database as JSON\n"
                 f"`{prefix}import [file] [mode]` / `/mechimport` - Import a reviewed export\n"
                 f"`{prefix}rebuildlogs` / `/mechrebuildlogs` - Rebuild the receipt log channel from the database\n"
+                f"`{prefix}fixpreviews` / `/mechfixpreviews` - Refresh old proof previews from saved files\n"
                 f"`{prefix}clean` / `/mechclean` - Delete non-log messages from the current channel or thread\n"
                 f"`{prefix}restartbot` / `/mechrestartbot` - Restart the bot remotely\n"
                 f"`{prefix}stop` / `/mechstop` - Shut the bot down gracefully"
@@ -390,7 +396,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             False,
         ).field(
             "Permissions",
-            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `clean`, `restartbot`, `stop`",
+            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `fixpreviews`, `clean`, `restartbot`, `stop`",
             False,
         )
     return embed.with_footer(f"Page {page + 1}/{HELP_PAGE_COUNT} • Use Prev/Next to browse.")
@@ -551,13 +557,18 @@ def calc_reply_payload(catalog_items: list[CatalogItem], session) -> ReplyPayloa
             session.rescan_active,
         ),
         ephemeral=True,
+        attachment_paths=split_proof_values(session.payment_proof_path),
     )
 
 
 def calc_embeds(catalog_items: list[CatalogItem], session) -> list[EmbedPayload]:
     embeds = [calc_embed(catalog_items, session)]
     embeds.extend(
-        proof_preview_embeds(session.payment_proof_source_url, "Bakunawa Mech Receipt Proof")
+        proof_preview_embeds(
+            session.payment_proof_source_url,
+            "Bakunawa Mech Receipt Proof",
+            session.payment_proof_path,
+        )
     )
     return embeds
 
@@ -928,9 +939,14 @@ def receipt_detail_payload(
     return ReplyPayload(
         embeds=[
             base_embed,
-            *proof_preview_embeds(receipt.payment_proof_source_url, "Bakunawa Mech Receipt Proof"),
+            *proof_preview_embeds(
+                receipt.payment_proof_source_url,
+                "Bakunawa Mech Receipt Proof",
+                receipt.payment_proof_path,
+            ),
         ],
         components=[ActionRowPayload(components=buttons)],
+        attachment_paths=split_proof_values(receipt.payment_proof_path),
         ephemeral=True,
     )
 
@@ -953,8 +969,16 @@ def receipt_main_payload(
         embed.field("Status", admin_receipt_status_label(receipt.status), True)
     return ReplyPayload(
         content=receipt_message_content(receipt.id, receipt.creator_user_id),
-        embeds=[embed, *proof_preview_embeds(receipt.payment_proof_source_url, "Payment Proof")],
+        embeds=[
+            embed,
+            *proof_preview_embeds(
+                receipt.payment_proof_source_url,
+                "Payment Proof",
+                receipt.payment_proof_path,
+            ),
+        ],
         components=[ActionRowPayload(components=receipt_main_action_buttons(receipt.id, receipt.creator_user_id))],
+        attachment_paths=split_proof_values(receipt.payment_proof_path),
         ephemeral=False,
     )
 
@@ -976,8 +1000,16 @@ def receipt_log_payload(
     embed.field("Status", admin_receipt_status_label(receipt.status), True)
     return ReplyPayload(
         content=receipt_message_content(receipt.id, receipt.creator_user_id),
-        embeds=[embed, *proof_preview_embeds(receipt.payment_proof_source_url, "Payment Proof")],
+        embeds=[
+            embed,
+            *proof_preview_embeds(
+                receipt.payment_proof_source_url,
+                "Payment Proof",
+                receipt.payment_proof_path,
+            ),
+        ],
         components=[ActionRowPayload(components=receipt_log_action_buttons(receipt.id, receipt.creator_user_id, receipt.status))],
+        attachment_paths=split_proof_values(receipt.payment_proof_path),
         ephemeral=False,
     )
 
@@ -1096,8 +1128,17 @@ def _receipt_note_field_value(admin_note: str) -> str:
     return f"{note[:997].rstrip()}..."
 
 
-def proof_preview_embeds(proof_urls: str | None, title_prefix: str) -> list[EmbedPayload]:
-    urls = [line.strip() for line in (proof_urls or "").splitlines() if line.strip()]
+def proof_preview_embeds(
+    proof_urls: str | None,
+    title_prefix: str,
+    proof_paths: str | None = None,
+) -> list[EmbedPayload]:
+    local_urls = [
+        f"attachment://{path.name}"
+        for path in (Path(value) for value in split_proof_values(proof_paths))
+        if path.is_file() and path.name
+    ]
+    urls = local_urls or split_proof_values(proof_urls)
     return [
         info_panel_embed(f"{title_prefix} {index}", f"Open: {url}").with_image(url)
         for index, url in enumerate(urls, start=1)
