@@ -130,11 +130,9 @@ base_materials = [
   "RESPRAY KIT",
   "VEHICLE WHEELS SET",
   "TYRE SMOKE KIT",
+  "??x Cosmetic Parts",
+  "??x Extras Kit",
 ]
-
-[packages.full_cosmetics.count_materials]
-cosmetic_parts = "COSMETIC PARTS"
-extras_kit = "EXTRAS KIT"
 
 [packages.repair]
 label = "[REPAIR] Repair Kit"

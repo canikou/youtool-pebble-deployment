@@ -3560,14 +3560,9 @@ class BakunawaMechDiscordClient(discord.Client):
         owner_user_id: int,
         package_key: str,
     ) -> None:
-        if package_key == "full_cosmetics":
-            await interaction.response.send_modal(FullCosmeticsModal(self, owner_user_id))
-            return
         choices: dict[str, str] = {}
         counts: dict[str, int] = {}
         session = await self.base_runtime.bot_state.current_session(owner_user_id)
-        if session is not None:
-            counts.update(_inherited_cosmetic_counts(session))
         if package_key == "full_upgrades":
             if session is not None:
                 choices.update(_inherited_full_tuning_choices(session))
@@ -5505,57 +5500,6 @@ class PackageSpecialPriceModal(discord.ui.Modal, title="Package Special Pricing"
         )
 
 
-class FullCosmeticsModal(discord.ui.Modal, title="Full Cosmetics"):
-    cosmetic_parts = discord.ui.TextInput(
-        label="Cosmetic Parts count",
-        custom_id="cosmetic_parts",
-        required=True,
-        default="0",
-    )
-    extras_kit = discord.ui.TextInput(
-        label="Extras Kit count",
-        custom_id="extras_kit",
-        required=True,
-        default="0",
-    )
-    override_unit_price = discord.ui.TextInput(
-        label="Special Pricing (optional)",
-        custom_id="override_unit_price",
-        required=False,
-        default="",
-    )
-
-    def __init__(self, client: BakunawaMechDiscordClient, owner_user_id: int) -> None:
-        super().__init__(timeout=300)
-        self._client = client
-        self._owner_user_id = owner_user_id
-
-    async def on_submit(self, interaction: discord.Interaction[Any]) -> None:
-        if interaction.user.id != self._owner_user_id:
-            await interaction.response.send_message(
-                "This calculator panel belongs to another user.",
-                ephemeral=True,
-            )
-            return
-        try:
-            counts = {
-                "cosmetic_parts": _parse_non_negative_count(str(self.cosmetic_parts), "Cosmetic Parts"),
-                "extras_kit": _parse_non_negative_count(str(self.extras_kit), "Extras Kit"),
-            }
-            override_unit_price = parse_add_item_inputs(str(self.override_unit_price))
-        except ValueError as error:
-            await interaction.response.send_message(str(error), ephemeral=True)
-            return
-        await self._client._add_package_with_optional_override(
-            interaction,
-            self._owner_user_id,
-            "full_cosmetics",
-            {},
-            counts,
-            override_unit_price,
-        )
-
-
 class ContractAddModal(discord.ui.Modal, title="Add or Update Contract"):
     contract_name = discord.ui.TextInput(
         label="Person / Gang",
@@ -5872,7 +5816,7 @@ def _package_option_description(package_key: str) -> str:
         "full_maintenance": "Standard or EV maintenance package",
         "full_upgrades": "TIER 3: Full Tuning plus engine included",
         "full_performance_upgrade": "TIER 1: includes 5x Performance Parts",
-        "full_cosmetics": "TIER 1: asks for vehicle-specific cosmetic counts",
+        "full_cosmetics": "TIER 1: includes vehicle-specific cosmetics as ??x",
         "repair": "REPAIR: quick 15k repair kit",
     }
     return descriptions.get(package_key, "Package")
@@ -5925,16 +5869,6 @@ def _next_package_choice_group(packages, package_key: str, choices: dict[str, st
         if group not in choices:
             return group
     return None
-
-
-def _parse_non_negative_count(raw: str, label: str) -> int:
-    try:
-        value = int(raw.strip())
-    except ValueError as error:
-        raise ValueError(f"{label} count must be a whole number.") from error
-    if value < 0:
-        raise ValueError(f"{label} count cannot be negative.")
-    return value
 
 
 def _pricing_source_label(pricing_source: PricingSource) -> str:
@@ -6031,19 +5965,6 @@ def _inherited_full_tuning_choices(session: CalculatorSession) -> dict[str, str]
                 for key, value in item.package_choices.items()
                 if key in {"drift", "tire", "drivetrain"}
             }
-    return {}
-
-
-def _inherited_cosmetic_counts(session: CalculatorSession) -> dict[str, int]:
-    for item in session.items:
-        if item.package_key in {"full_cosmetics", "full_tuning", "full_upgrades"}:
-            counts = {
-                key: value
-                for key, value in item.package_counts.items()
-                if key in {"cosmetic_parts", "extras_kit"}
-            }
-            if counts:
-                return counts
     return {}
 
 

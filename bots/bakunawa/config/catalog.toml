@@ -327,6 +327,6 @@ active = true
 name = "FULL COSMETIC"
 aliases = ["full cosmetics"]
 unit_price = 5000
-unit_cost = 1100
+unit_cost = 0
 category = "PACKAGE"
 active = true

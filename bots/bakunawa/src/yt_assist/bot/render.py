@@ -382,7 +382,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             (
                 "Use Add Package for Tier 1, Tier 2, Tier 3, or Full Maintenance jobs.\n"
                 "Use Add Individual Items for one-off upgrades or materials.\n"
-                "`[TIER 1] Full Cosmetics` asks for Cosmetic Parts and Extras Kit counts because those depend on the vehicle model.\n"
+                "`[TIER 1] Full Cosmetics` lists vehicle-specific Cosmetic Parts and Extras Kit usage as `??x`.\n"
                 "`[TIER 3] Full Tuning + Engine` inherits existing Full Tuning selections when present.\n"
                 "`Nitrous` remains visible as a pricing placeholder until the catalog price is filled.\n"
                 f"`{prefix}calc @user` lets an admin record a receipt on someone else's behalf."
