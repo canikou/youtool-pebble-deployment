@@ -169,6 +169,7 @@ class ReplyPayload:
     components: list[ActionRowPayload] = field(default_factory=list)
     ephemeral: bool = False
     attachment_paths: list[str] = field(default_factory=list)
+    silent_mentions: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"ephemeral": self.ephemeral}
@@ -180,6 +181,8 @@ class ReplyPayload:
             payload["components"] = [row.to_dict() for row in self.components]
         if self.attachment_paths:
             payload["attachment_paths"] = list(self.attachment_paths)
+        if self.silent_mentions:
+            payload["silent_mentions"] = True
         return payload
 
 
@@ -1010,6 +1013,7 @@ def receipt_log_payload(
         ],
         components=[ActionRowPayload(components=receipt_log_action_buttons(receipt.id, receipt.creator_user_id, receipt.status))],
         attachment_paths=split_proof_values(receipt.payment_proof_path),
+        silent_mentions=True,
         ephemeral=False,
     )
 

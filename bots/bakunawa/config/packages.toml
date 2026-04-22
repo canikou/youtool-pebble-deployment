@@ -1,4 +1,5 @@
 [choices.tire]
+no_tires = "No Tires"
 slick = "Slick Tyres"
 semi_slick = "Semi-Slick Tyres"
 off_road = "Off-Road Tyres"
@@ -23,6 +24,7 @@ standard = "Standard"
 ev = "EV"
 
 [materials.tire]
+no_tires = ""
 slick = "Slick Tyres"
 semi_slick = "Semi-Slick Tyres"
 off_road = "Off-Road Tyres"

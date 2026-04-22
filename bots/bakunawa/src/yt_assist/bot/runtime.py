@@ -134,6 +134,7 @@ class DiscordReplySpec:
     view: discord.ui.View | None
     ephemeral: bool
     attachment_paths: list[str]
+    allowed_mentions: discord.AllowedMentions | None
 
     def send_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -146,6 +147,8 @@ class DiscordReplySpec:
         files = _discord_files_from_paths(self.attachment_paths)
         if files:
             kwargs["files"] = files
+        if self.allowed_mentions is not None:
+            kwargs["allowed_mentions"] = self.allowed_mentions
         return kwargs
 
     def edit_kwargs(self) -> dict[str, Any]:
@@ -157,6 +160,8 @@ class DiscordReplySpec:
         files = _discord_files_from_paths(self.attachment_paths)
         if files:
             kwargs["attachments"] = files
+        if self.allowed_mentions is not None:
+            kwargs["allowed_mentions"] = self.allowed_mentions
         return kwargs
 
 
@@ -750,6 +755,7 @@ def reply_payload_to_spec(
         view=view_from_payload(client, runtime, payload),
         ephemeral=payload.ephemeral,
         attachment_paths=list(payload.attachment_paths),
+        allowed_mentions=discord.AllowedMentions.none() if payload.silent_mentions else None,
     )
 
 
