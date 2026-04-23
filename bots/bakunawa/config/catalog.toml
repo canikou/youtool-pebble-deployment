@@ -130,7 +130,7 @@ name = "REPAIR KIT TAKEOUT"
 aliases = ["repair kit (take out)", "repair kit takeout", "repair takeout"]
 unit_price = 20000
 unit_cost = 7000
-category = "TAKEOUT"
+category = "REPAIR"
 active = true
 
 [[items]]
