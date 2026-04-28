@@ -263,7 +263,7 @@ class Database:
                     SUM(r.procurement_cost) AS reimbursement,
                     SUM(r.profit) AS profit,
                     COUNT(*) AS receipt_count,
-                    SUM(r.profit) AS total_payout_half_units
+                    SUM(r.profit * 60) AS total_payout_cents
                 FROM receipts r
                 WHERE r.status = 'active'
                 GROUP BY r.creator_user_id
@@ -284,7 +284,7 @@ class Database:
                     SUM(r.procurement_cost) AS reimbursement,
                     SUM(r.profit) AS profit,
                     COUNT(*) AS receipt_count,
-                    SUM(r.profit) AS total_payout_half_units
+                    SUM(r.profit * 60) AS total_payout_cents
                 FROM receipts r
                 WHERE r.status = 'active'
                   AND r.creator_user_id = ?
@@ -299,7 +299,7 @@ class Database:
         for row in rows:
             reimbursement = int(row["reimbursement"])
             profit = int(row["profit"])
-            total_payout_half_units = int(row["total_payout_half_units"])
+            total_payout_cents = int(row["total_payout_cents"])
             user_id = str(row["creator_user_id"])
             company_balance = 0
             entries.append(
@@ -308,17 +308,17 @@ class Database:
                     display_name=str(row["creator_display_name"]),
                     reimbursement=reimbursement,
                     profit=profit,
-                    total_payout_half_units=total_payout_half_units,
+                    total_payout_cents=total_payout_cents,
                     company_balance=company_balance,
-                    adjusted_total_payout_half_units=total_payout_half_units,
+                    adjusted_total_payout_cents=total_payout_cents,
                     receipt_count=int(row["receipt_count"]),
                 )
             )
 
         entries.sort(
             key=lambda entry: (
-                -entry.adjusted_total_payout_half_units,
-                -entry.total_payout_half_units,
+                -entry.adjusted_total_payout_cents,
+                -entry.total_payout_cents,
                 -entry.profit,
                 entry.display_name,
             )

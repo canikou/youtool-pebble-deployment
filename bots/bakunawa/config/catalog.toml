@@ -1,7 +1,7 @@
 [[items]]
 name = "SLICK TYRES"
 aliases = ["slick tires", "slick tyres"]
-unit_price = 30000
+unit_price = 35000
 unit_cost = 18000
 category = "TUNING"
 active = true
@@ -9,7 +9,7 @@ active = true
 [[items]]
 name = "SEMI SLICK TYRES UPGRADE"
 aliases = ["semi slick", "semi-slick", "semi slick tyres", "semi-slick tyres"]
-unit_price = 30000
+unit_price = 35000
 unit_cost = 18000
 category = "TUNING"
 active = true
@@ -17,7 +17,7 @@ active = true
 [[items]]
 name = "OFFROAD TYRES"
 aliases = ["off-road", "offroad", "off road tyres", "off-road tyres"]
-unit_price = 30000
+unit_price = 35000
 unit_cost = 18000
 category = "TUNING"
 active = true
@@ -25,7 +25,7 @@ active = true
 [[items]]
 name = "DRIFT TUNING KIT"
 aliases = ["drift kit"]
-unit_price = 30000
+unit_price = 35000
 unit_cost = 18000
 category = "TUNING"
 active = true
@@ -33,7 +33,7 @@ active = true
 [[items]]
 name = "AWD DRIVETRAIN"
 aliases = ["awd"]
-unit_price = 60000
+unit_price = 65000
 unit_cost = 35000
 category = "TUNING"
 active = true
@@ -41,7 +41,7 @@ active = true
 [[items]]
 name = "RWD DRIVETRAIN"
 aliases = ["rwd"]
-unit_price = 60000
+unit_price = 65000
 unit_cost = 35000
 category = "TUNING"
 active = true
@@ -49,7 +49,7 @@ active = true
 [[items]]
 name = "FWD DRIVETRAIN"
 aliases = ["fwd"]
-unit_price = 60000
+unit_price = 65000
 unit_cost = 35000
 category = "TUNING"
 active = true
@@ -57,70 +57,70 @@ active = true
 [[items]]
 name = "2x LIGHTING CONTROLLER"
 aliases = ["lighting controller", "2 lighting controller"]
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "STANCER KIT"
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "COSMETIC PARTS"
-unit_price = 500
+unit_price = 0
 unit_cost = 500
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "RESPRAY KIT"
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "VEHICLE WHEELS SET"
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "TYRE SMOKE KIT"
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "EXTRAS KIT"
-unit_price = 500
+unit_price = 0
 unit_cost = 100
 category = "COSMETIC"
-active = true
+active = false
 
 [[items]]
 name = "CLEANING KIT"
-unit_price = 5000
+unit_price = 6000
 unit_cost = 3000
 category = "REPAIR"
 active = true
 
 [[items]]
 name = "REPAIR KIT"
-unit_price = 15000
+unit_price = 20000
 unit_cost = 7000
 category = "REPAIR"
 active = true
 
 [[items]]
 name = "CLEANING KIT (TAKE OUT)"
-unit_price = 20000
+unit_price = 25000
 unit_cost = 3000
 category = "TAKEOUT"
 active = true
@@ -128,21 +128,21 @@ active = true
 [[items]]
 name = "REPAIR KIT TAKEOUT"
 aliases = ["repair kit (take out)", "repair kit takeout", "repair takeout"]
-unit_price = 20000
+unit_price = 25000
 unit_cost = 7000
 category = "REPAIR"
 active = true
 
 [[items]]
 name = "DUCT TAPE"
-unit_price = 1000
+unit_price = 5000
 unit_cost = 100
 category = ""
 active = true
 
 [[items]]
 name = "ENGINE OIL"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 10000
 category = "MAINTENANCE"
 active = true
@@ -150,21 +150,21 @@ active = true
 [[items]]
 name = "4x TYRE REPLACEMENT"
 aliases = ["tyre replacement", "tire replacement"]
-unit_price = 50000
+unit_price = 55000
 unit_cost = 11200
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "CLUTCH REPLACEMENT"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 10000
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "AIR FILTER"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 10000
 category = "MAINTENANCE"
 active = true
@@ -172,14 +172,14 @@ active = true
 [[items]]
 name = "4x SPARK PLUG"
 aliases = ["spark plug", "spark plugs"]
-unit_price = 50000
+unit_price = 55000
 unit_cost = 11200
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "SUSPENSION PARTS"
-unit_price = 10000
+unit_price = 15000
 unit_cost = 1000
 category = "MAINTENANCE"
 active = true
@@ -187,42 +187,42 @@ active = true
 [[items]]
 name = "4x BRAKEPAD REPLACEMENT"
 aliases = ["brakepad replacement", "brake pad replacement"]
-unit_price = 50000
+unit_price = 55000
 unit_cost = 11200
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "EV MOTOR REPLACEMENT"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 8000
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "EV BATTERY REPLACEMENT"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 8000
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "EV COOLANT REPLACEMENT"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 8000
 category = "MAINTENANCE"
 active = true
 
 [[items]]
 name = "TURBO CHARGER"
-unit_price = 50000
+unit_price = 55000
 unit_cost = 25000
 category = "TUNING"
 active = true
 
 [[items]]
 name = "CERAMIC BRAKES"
-unit_price = 60000
+unit_price = 65000
 unit_cost = 18000
 category = "TUNING"
 active = true
@@ -283,35 +283,35 @@ active = true
 
 [[items]]
 name = "FULL TUNING"
-unit_price = 200000
+unit_price = 210000
 unit_cost = 124600
 category = "PACKAGE"
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V12)"
-unit_price = 1200000
+unit_price = 1400000
 unit_cost = 824600
 category = "PACKAGE"
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V8)"
-unit_price = 800000
+unit_price = 1000000
 unit_cost = 624600
 category = "PACKAGE"
 active = true
 
 [[items]]
 name = "FULL UPGRADES (V6)"
-unit_price = 600000
+unit_price = 800000
 unit_cost = 524600
 category = "PACKAGE"
 active = true
 
 [[items]]
 name = "FULL UPGRADES (I4)"
-unit_price = 400000
+unit_price = 600000
 unit_cost = 324600
 category = "PACKAGE"
 active = true
@@ -319,7 +319,7 @@ active = true
 [[items]]
 name = "FULL PERFORMANCE UPGRADES"
 aliases = ["full performance upgrade"]
-unit_price = 30000
+unit_price = 35000
 unit_cost = 2500
 category = "PACKAGE"
 active = true
@@ -327,7 +327,7 @@ active = true
 [[items]]
 name = "FULL COSMETIC"
 aliases = ["full cosmetics"]
-unit_price = 5000
+unit_price = 10000
 unit_cost = 0
 category = "PACKAGE"
 active = true

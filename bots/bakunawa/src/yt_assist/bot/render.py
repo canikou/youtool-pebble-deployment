@@ -28,6 +28,8 @@ THEME_ERROR = 0xC1121F
 THEME_LIFECYCLE_ONLINE = 0x7C3AED
 LIFECYCLE_STATUS_TITLE = "Bakunawa Mech Status"
 HELP_PAGE_COUNT = 4
+STAFF_PAYOUT_PERCENT = 60
+STAFF_PAYOUT_BPS = STAFF_PAYOUT_PERCENT * 100
 
 BUTTON_STYLE_PRIMARY = 1
 BUTTON_STYLE_SECONDARY = 2
@@ -258,7 +260,7 @@ def render_payout_description(entries: list[PayoutEntry]) -> str:
         return "No unpaid receipts waiting for payout."
     lines: list[str] = []
     for index, entry in enumerate(entries, start=1):
-        lines.append(f"{index}. <@{entry.user_id}> | Pay: **${format_half_money(entry.total_payout_half_units)}**")
+        lines.append(f"{index}. <@{entry.user_id}> | Pay: **${format_money_cents(entry.total_payout_cents)}**")
     return "\n".join(lines)
 
 
@@ -289,25 +291,23 @@ def render_contracts_description(contracts: list[Contract]) -> str:
     return "\n".join(lines)
 
 
-def format_half_money(amount_times_two: int) -> str:
-    is_negative = amount_times_two < 0
-    absolute = abs(amount_times_two)
-    whole = absolute // 2
+def format_money_cents(amount_cents: int) -> str:
+    is_negative = amount_cents < 0
+    absolute = abs(amount_cents)
+    whole = absolute // 100
+    cents = absolute % 100
     prefix = "-" if is_negative else ""
-    if absolute % 2:
-        return f"{prefix}{format_money(whole)}.50"
+    if cents:
+        return f"{prefix}{format_money(whole)}.{cents:02d}"
     return f"{prefix}{format_money(whole)}"
 
 
-def _staff_payout_half_units(reimbursement: int, profit: int) -> int:
-    return reimbursement * 2 + profit
+def _staff_payout_cents(profit: int) -> int:
+    return profit * STAFF_PAYOUT_BPS // 100
 
 
-def _youtool_profit_after_staff_payout_half_units(
-    total_sales: int,
-    total_payout_half_units: int,
-) -> int:
-    return total_sales * 2 - total_payout_half_units
+def _company_net_profit_after_staff_payout_cents(profit: int, total_payout_cents: int) -> int:
+    return profit * 100 - total_payout_cents
 
 
 def _clamp_help_page(page: int) -> int:
@@ -437,10 +437,10 @@ def stats_embed(sort: StatsSort, entries: list[LeaderboardEntry]) -> EmbedPayloa
     total_sales = sum(entry.total_sales for entry in entries)
     total_procurement = sum(entry.procurement_cost for entry in entries)
     total_profit = total_sales - total_procurement
-    total_payout_half_units = total_profit
-    company_net_profit_after_staff_payout = _youtool_profit_after_staff_payout_half_units(
-        total_sales - total_procurement,
-        total_payout_half_units,
+    total_payout_cents = _staff_payout_cents(total_profit)
+    company_net_profit_after_staff_payout = _company_net_profit_after_staff_payout_cents(
+        total_profit,
+        total_payout_cents,
     )
     total_receipts = sum(entry.receipt_count for entry in entries)
     embed = (
@@ -453,8 +453,8 @@ def stats_embed(sort: StatsSort, entries: list[LeaderboardEntry]) -> EmbedPayloa
                 f"Total Sales ${format_money(total_sales)}\n"
                 f"Company Cost ${format_money(total_procurement)}\n"
                 f"Gross Profit ${format_money(total_profit)}\n"
-                f"Total Staff Payout ${format_half_money(total_payout_half_units)}\n"
-                f"Company Net Profit ${format_half_money(company_net_profit_after_staff_payout)}\n"
+                f"Total Staff Payout ${format_money_cents(total_payout_cents)}\n"
+                f"Company Net Profit ${format_money_cents(company_net_profit_after_staff_payout)}\n"
                 f"Receipts {total_receipts}"
             ),
             False,
@@ -468,16 +468,19 @@ def stats_embed(sort: StatsSort, entries: list[LeaderboardEntry]) -> EmbedPayloa
 
 
 def payouts_embed(entries: list[PayoutEntry]) -> EmbedPayload:
-    total_payout_half_units = sum(entry.total_payout_half_units for entry in entries)
+    total_payout_cents = sum(entry.total_payout_cents for entry in entries)
     total_profit = sum(entry.profit for entry in entries)
-    company_net_profit_after_staff_payout = total_profit * 2 - total_payout_half_units
+    company_net_profit_after_staff_payout = _company_net_profit_after_staff_payout_cents(
+        total_profit,
+        total_payout_cents,
+    )
     embed = (
         panel_embed("Bakunawa Mech Payouts", render_payout_description(entries))
         .field("Employees", str(len(entries)), True)
-        .field("Total Staff Payout", f"${format_half_money(total_payout_half_units)}", True)
+        .field("Total Staff Payout", f"${format_money_cents(total_payout_cents)}", True)
         .field(
             "Company Net Profit",
-            f"${format_half_money(company_net_profit_after_staff_payout)}",
+            f"${format_money_cents(company_net_profit_after_staff_payout)}",
             True,
         )
     )
@@ -655,7 +658,7 @@ def render_session_description(
             "**Total Sale:** $0\n"
             "**Company Cost:** $0\n"
             "**Profit:** $0\n"
-            "**Staff Pay (50% Profit):** $0\n\n"
+            f"**Staff Pay ({STAFF_PAYOUT_PERCENT}% Profit):** $0\n\n"
             f"**Proof:** {session_proof_status(session)}\n\n"
             "**Billable Items:**\n"
             "- No items yet"
@@ -707,14 +710,14 @@ def render_session_description(
         if material_lines
         else "- No package materials yet"
     )
-    staff_pay_half_units = priced.profit
+    staff_pay_cents = _staff_payout_cents(priced.profit)
 
     return (
         f"**Credited To:** {session.credited_display_name} ({session.credited_user_id})\n"
         f"**Total Sale:** ${format_money(priced.total_sale)}\n"
         f"**Company Cost:** ${format_money(priced.procurement_cost)}\n"
         f"**Profit:** ${format_money(priced.profit)}\n"
-        f"**Staff Pay (50% Profit):** ${format_half_money(staff_pay_half_units)}\n"
+        f"**Staff Pay ({STAFF_PAYOUT_PERCENT}% Profit):** ${format_money_cents(staff_pay_cents)}\n"
         f"**Proof:** {session_proof_status(session)}\n"
         f"{workflow_notice}"
         f"**Billable Items:**\n{billable_text}\n\n"
@@ -1088,7 +1091,7 @@ def receipt_embed(
         f"**Total Sale:** ${format_money(total_sale)}\n"
         f"**Company Cost:** ${format_money(procurement_cost)}\n"
         f"**Profit:** ${format_money(profit)}\n"
-        f"**Staff Pay (50% Profit):** ${format_half_money(profit)}\n"
+        f"**Staff Pay ({STAFF_PAYOUT_PERCENT}% Profit):** ${format_money_cents(_staff_payout_cents(profit))}\n"
         f"**Credited To:** {creator_username} ({creator_user_id})\n\n"
         f"**Items and Materials:**\n{items_text}"
     )

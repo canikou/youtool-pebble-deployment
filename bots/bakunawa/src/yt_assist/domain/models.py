@@ -306,9 +306,9 @@ class PayoutEntry:
     display_name: str
     reimbursement: int
     profit: int
-    total_payout_half_units: int
+    total_payout_cents: int
     company_balance: int
-    adjusted_total_payout_half_units: int
+    adjusted_total_payout_cents: int
     receipt_count: int
 
 
