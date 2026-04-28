@@ -308,6 +308,7 @@ class PayoutEntry:
     profit: int
     total_payout_cents: int
     company_balance: int
+    adjustment_cents: int
     adjusted_total_payout_cents: int
     receipt_count: int
 

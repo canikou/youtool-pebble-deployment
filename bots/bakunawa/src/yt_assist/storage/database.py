@@ -39,7 +39,7 @@ from yt_assist.domain.serialization import parse_datetime
 from yt_assist.storage.migrations import run_migrations
 
 LOGGER = logging.getLogger(__name__)
-EXPORT_SCHEMA_VERSION = 3
+EXPORT_SCHEMA_VERSION = 4
 PROCUREMENT_CUTOVER_ROW_ID = 1
 
 
@@ -248,73 +248,107 @@ class Database:
         ]
 
     async def payouts(self, creator_user_id: str | None) -> list[PayoutEntry]:
+        raw_entries: dict[str, PayoutEntry] = {}
         if creator_user_id is None:
             query = """
                 SELECT
-                    r.creator_user_id,
-                    (
-                        SELECT latest.creator_display_name
-                        FROM receipts latest
-                        WHERE latest.status IN ('active', 'paid')
-                          AND latest.creator_user_id = r.creator_user_id
-                        ORDER BY latest.finalized_at DESC, latest.id DESC
-                        LIMIT 1
-                    ) AS creator_display_name,
+                    COALESCE(accounting.recorded_for_user_id, r.creator_user_id) AS payout_user_id,
+                    MAX(COALESCE(accounting.recorded_for_display_name, r.creator_display_name)) AS payout_display_name,
                     SUM(r.procurement_cost) AS reimbursement,
                     SUM(r.profit) AS profit,
                     COUNT(*) AS receipt_count,
                     SUM(r.profit * 60) AS total_payout_cents
                 FROM receipts r
+                LEFT JOIN receipt_accounting accounting ON accounting.receipt_id = r.id
                 WHERE r.status = 'active'
-                GROUP BY r.creator_user_id
+                GROUP BY COALESCE(accounting.recorded_for_user_id, r.creator_user_id)
             """
             params: tuple[Any, ...] = ()
         else:
             query = """
                 SELECT
-                    r.creator_user_id,
-                    (
-                        SELECT latest.creator_display_name
-                        FROM receipts latest
-                        WHERE latest.status IN ('active', 'paid')
-                          AND latest.creator_user_id = r.creator_user_id
-                        ORDER BY latest.finalized_at DESC, latest.id DESC
-                        LIMIT 1
-                    ) AS creator_display_name,
+                    COALESCE(accounting.recorded_for_user_id, r.creator_user_id) AS payout_user_id,
+                    MAX(COALESCE(accounting.recorded_for_display_name, r.creator_display_name)) AS payout_display_name,
                     SUM(r.procurement_cost) AS reimbursement,
                     SUM(r.profit) AS profit,
                     COUNT(*) AS receipt_count,
                     SUM(r.profit * 60) AS total_payout_cents
                 FROM receipts r
+                LEFT JOIN receipt_accounting accounting ON accounting.receipt_id = r.id
                 WHERE r.status = 'active'
-                  AND r.creator_user_id = ?
-                GROUP BY r.creator_user_id
+                  AND COALESCE(accounting.recorded_for_user_id, r.creator_user_id) = ?
+                GROUP BY COALESCE(accounting.recorded_for_user_id, r.creator_user_id)
             """
             params = (creator_user_id,)
 
         async with self._connection.execute(query, params) as cursor:
             rows = await cursor.fetchall()
 
-        entries: list[PayoutEntry] = []
         for row in rows:
             reimbursement = int(row["reimbursement"])
             profit = int(row["profit"])
             total_payout_cents = int(row["total_payout_cents"])
-            user_id = str(row["creator_user_id"])
-            company_balance = 0
-            entries.append(
-                PayoutEntry(
-                    user_id=user_id,
-                    display_name=str(row["creator_display_name"]),
-                    reimbursement=reimbursement,
-                    profit=profit,
-                    total_payout_cents=total_payout_cents,
-                    company_balance=company_balance,
-                    adjusted_total_payout_cents=total_payout_cents,
-                    receipt_count=int(row["receipt_count"]),
-                )
+            user_id = str(row["payout_user_id"])
+            raw_entries[user_id] = PayoutEntry(
+                user_id=user_id,
+                display_name=str(row["payout_display_name"]),
+                reimbursement=reimbursement,
+                profit=profit,
+                total_payout_cents=total_payout_cents,
+                company_balance=0,
+                adjustment_cents=0,
+                adjusted_total_payout_cents=total_payout_cents,
+                receipt_count=int(row["receipt_count"]),
             )
 
+        if creator_user_id is None:
+            adjustment_query = """
+                SELECT
+                    user_id,
+                    MAX(display_name) AS display_name,
+                    SUM(amount_cents) AS adjustment_cents
+                FROM payout_adjustments
+                WHERE settled_at IS NULL
+                GROUP BY user_id
+            """
+            adjustment_params: tuple[Any, ...] = ()
+        else:
+            adjustment_query = """
+                SELECT
+                    user_id,
+                    MAX(display_name) AS display_name,
+                    SUM(amount_cents) AS adjustment_cents
+                FROM payout_adjustments
+                WHERE settled_at IS NULL
+                  AND user_id = ?
+                GROUP BY user_id
+            """
+            adjustment_params = (creator_user_id,)
+
+        async with self._connection.execute(adjustment_query, adjustment_params) as cursor:
+            adjustment_rows = await cursor.fetchall()
+
+        for row in adjustment_rows:
+            user_id = str(row["user_id"])
+            adjustment_cents = int(row["adjustment_cents"])
+            existing = raw_entries.get(user_id)
+            if existing is None:
+                raw_entries[user_id] = PayoutEntry(
+                    user_id=user_id,
+                    display_name=str(row["display_name"]),
+                    reimbursement=0,
+                    profit=0,
+                    total_payout_cents=0,
+                    company_balance=0,
+                    adjustment_cents=adjustment_cents,
+                    adjusted_total_payout_cents=adjustment_cents,
+                    receipt_count=0,
+                )
+                continue
+            existing.adjustment_cents = adjustment_cents
+            existing.adjusted_total_payout_cents = existing.total_payout_cents + adjustment_cents
+
+        entries = list(raw_entries.values())
         entries.sort(
             key=lambda entry: (
                 -entry.adjusted_total_payout_cents,
@@ -324,6 +358,143 @@ class Database:
             )
         )
         return entries
+
+    async def list_open_payout_adjustment_user_ids(self) -> list[str]:
+        async with self._connection.execute(
+            """
+            SELECT DISTINCT user_id
+            FROM payout_adjustments
+            WHERE settled_at IS NULL
+            ORDER BY user_id ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [str(row["user_id"]) for row in rows]
+
+    async def apply_payout_adjustments(
+        self,
+        adjustments: list[tuple[str, str, int, str, str | None, str | None]],
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> int:
+        if not adjustments:
+            return 0
+
+        created_at = utcnow()
+        inserted = 0
+        await self._connection.execute("BEGIN")
+        try:
+            for (
+                user_id,
+                display_name,
+                amount_cents,
+                reason,
+                source_user_id,
+                source_display_name,
+            ) in adjustments:
+                cursor = await self._connection.execute(
+                    """
+                    INSERT INTO payout_adjustments (
+                        user_id,
+                        display_name,
+                        amount_cents,
+                        reason,
+                        source_user_id,
+                        source_display_name,
+                        actor_user_id,
+                        actor_display_name,
+                        created_at,
+                        settled_at,
+                        settled_by_user_id,
+                        settled_by_display_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        user_id,
+                        display_name,
+                        amount_cents,
+                        reason,
+                        source_user_id,
+                        source_display_name,
+                        actor_user_id,
+                        actor_display_name,
+                        created_at.isoformat(),
+                    ),
+                )
+                inserted_id = int(cursor.lastrowid)
+                await self._insert_audit_event(
+                    AuditEventInput(
+                        actor_user_id=actor_user_id,
+                        actor_display_name=actor_display_name,
+                        action="payout_adjustment_created",
+                        target_receipt_id=None,
+                        detail_json={
+                            "adjustment_id": inserted_id,
+                            "user_id": user_id,
+                            "display_name": display_name,
+                            "amount_cents": amount_cents,
+                            "reason": reason,
+                            "source_user_id": source_user_id,
+                            "source_display_name": source_display_name,
+                            "created_at": created_at.isoformat(),
+                        },
+                    )
+                )
+                inserted += 1
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+        return inserted
+
+    async def settle_payout_adjustments(
+        self,
+        user_ids: list[str] | None,
+        actor_user_id: str,
+        actor_display_name: str,
+        reason: str,
+    ) -> int:
+        settled_at = utcnow()
+        params: list[Any] = [settled_at.isoformat(), actor_user_id, actor_display_name]
+        where_clause = "settled_at IS NULL"
+        if user_ids is not None:
+            if not user_ids:
+                return 0
+            placeholders = ", ".join("?" for _ in user_ids)
+            where_clause += f" AND user_id IN ({placeholders})"
+            params.extend(user_ids)
+
+        await self._connection.execute("BEGIN")
+        try:
+            cursor = await self._connection.execute(
+                f"""
+                UPDATE payout_adjustments
+                SET settled_at = ?, settled_by_user_id = ?, settled_by_display_name = ?
+                WHERE {where_clause}
+                """,
+                tuple(params),
+            )
+            updated = cursor.rowcount
+            if updated > 0:
+                await self._insert_audit_event(
+                    AuditEventInput(
+                        actor_user_id=actor_user_id,
+                        actor_display_name=actor_display_name,
+                        action="payout_adjustments_settled",
+                        target_receipt_id=None,
+                        detail_json={
+                            "reason": reason,
+                            "user_ids": list(user_ids) if user_ids is not None else None,
+                            "settled_count": updated,
+                            "settled_at": settled_at.isoformat(),
+                        },
+                    )
+                )
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+        return updated
 
     async def documented_receipt_sources(self) -> DocumentedReceiptSources:
         async with self._connection.execute(
@@ -869,6 +1040,57 @@ class Database:
             """
             SELECT
                 id,
+                user_id,
+                display_name,
+                amount_cents,
+                reason,
+                source_user_id,
+                source_display_name,
+                actor_user_id,
+                actor_display_name,
+                created_at,
+                settled_at,
+                settled_by_user_id,
+                settled_by_display_name
+            FROM payout_adjustments
+            ORDER BY created_at ASC, id ASC
+            """
+        ) as cursor:
+            payout_adjustment_rows = await cursor.fetchall()
+        for row in payout_adjustment_rows:
+            created_at = parse_datetime(str(row["created_at"]))
+            detail_json = {
+                "adjustment_id": int(row["id"]),
+                "user_id": str(row["user_id"]),
+                "display_name": str(row["display_name"]),
+                "amount_cents": int(row["amount_cents"]),
+                "reason": str(row["reason"]),
+                "source_user_id": row["source_user_id"],
+                "source_display_name": row["source_display_name"],
+                "actor_user_id": str(row["actor_user_id"]),
+                "actor_display_name": str(row["actor_display_name"]),
+                "created_at": str(row["created_at"]),
+                "settled_at": row["settled_at"],
+                "settled_by_user_id": row["settled_by_user_id"],
+                "settled_by_display_name": row["settled_by_display_name"],
+            }
+            synthetic_audit_events.append(
+                AuditEvent(
+                    id=synthetic_id,
+                    actor_user_id=str(row["actor_user_id"]),
+                    actor_display_name=str(row["actor_display_name"]),
+                    action="payout_adjustment_snapshot",
+                    target_receipt_id=None,
+                    detail_json=detail_json,
+                    created_at=created_at,
+                )
+            )
+            synthetic_id -= 1
+
+        async with self._connection.execute(
+            """
+            SELECT
+                id,
                 actor_user_id,
                 actor_display_name,
                 action,
@@ -896,6 +1118,7 @@ class Database:
         try:
             await self._connection.execute("DELETE FROM receipt_accounting")
             await self._connection.execute("DELETE FROM procurement_ledger")
+            await self._connection.execute("DELETE FROM payout_adjustments")
             await self._connection.execute(
                 "DELETE FROM procurement_settings WHERE id = ?",
                 (PROCUREMENT_CUTOVER_ROW_ID,),
@@ -1076,7 +1299,7 @@ class Database:
             report.imported_receipts += 1
 
         for audit in bundle.audit_events:
-            if await self._restore_procurement_metadata_from_audit_event(audit):
+            if await self._restore_snapshot_metadata_from_audit_event(audit):
                 continue
 
             async with self._connection.execute(
@@ -1115,7 +1338,7 @@ class Database:
         await self._connection.commit()
         return report
 
-    async def _restore_procurement_metadata_from_audit_event(self, audit: AuditEvent) -> bool:
+    async def _restore_snapshot_metadata_from_audit_event(self, audit: AuditEvent) -> bool:
         if audit.action == "receipt_accounting_snapshot":
             await self._restore_receipt_accounting_snapshot(audit)
             return True
@@ -1124,6 +1347,9 @@ class Database:
             return True
         if audit.action == "procurement_ledger_entry":
             await self._restore_procurement_ledger_from_audit(audit)
+            return True
+        if audit.action == "payout_adjustment_snapshot":
+            await self._restore_payout_adjustment_from_audit(audit)
             return True
         return False
 
@@ -1231,6 +1457,55 @@ class Database:
                 str(detail.get("actor_user_id") or audit.actor_user_id),
                 str(detail.get("actor_display_name") or audit.actor_display_name),
                 created_at.isoformat(),
+            ),
+        )
+
+    async def _restore_payout_adjustment_from_audit(self, audit: AuditEvent) -> None:
+        detail = dict(audit.detail_json)
+        adjustment_id = detail.get("adjustment_id")
+        if adjustment_id is None:
+            return
+
+        async with self._connection.execute(
+            "SELECT 1 FROM payout_adjustments WHERE id = ?",
+            (int(adjustment_id),),
+        ) as cursor:
+            exists = await cursor.fetchone()
+        if exists is not None:
+            return
+
+        await self._connection.execute(
+            """
+            INSERT INTO payout_adjustments (
+                id,
+                user_id,
+                display_name,
+                amount_cents,
+                reason,
+                source_user_id,
+                source_display_name,
+                actor_user_id,
+                actor_display_name,
+                created_at,
+                settled_at,
+                settled_by_user_id,
+                settled_by_display_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(adjustment_id),
+                str(detail.get("user_id") or ""),
+                str(detail.get("display_name") or detail.get("user_id") or ""),
+                int(detail.get("amount_cents") or 0),
+                str(detail.get("reason") or ""),
+                detail.get("source_user_id"),
+                detail.get("source_display_name"),
+                str(detail.get("actor_user_id") or audit.actor_user_id),
+                str(detail.get("actor_display_name") or audit.actor_display_name),
+                str(detail.get("created_at") or audit.created_at.isoformat()),
+                detail.get("settled_at"),
+                detail.get("settled_by_user_id"),
+                detail.get("settled_by_display_name"),
             ),
         )
 

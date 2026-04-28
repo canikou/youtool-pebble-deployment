@@ -29,6 +29,7 @@ from yt_assist.domain.contracts import (
 )
 from yt_assist.domain.models import (
     AccountingPolicy,
+    AuditEvent,
     AuditEventInput,
     DraftItem,
     ExportBundle,
@@ -4521,7 +4522,15 @@ class BakunawaMechDiscordClient(discord.Client):
             audit_events=[
                 event
                 for event in bundle.audit_events
-                if event.target_receipt_id is not None and event.target_receipt_id in affected_receipt_ids
+                if (
+                    event.target_receipt_id is not None
+                    and event.target_receipt_id in affected_receipt_ids
+                )
+                or (
+                    action is ResetAction.MARK_PAID
+                    and event.action == "payout_adjustment_snapshot"
+                    and _reset_adjustment_snapshot_matches_scope(event, scope.mode, scope.user_ids)
+                )
             ],
         )
         summary = render_stats_description(_leaderboard_from_receipts(affected_receipts))
@@ -4539,10 +4548,25 @@ class BakunawaMechDiscordClient(discord.Client):
             getattr(interaction.user, "display_name", interaction.user.name),
             None,
         )
+        settled_adjustments = 0
+        if action is ResetAction.MARK_PAID:
+            open_adjustment_user_ids = await self.base_runtime.database.list_open_payout_adjustment_user_ids()
+            adjustment_user_ids = _reset_adjustment_target_user_ids(
+                scope.mode,
+                scope.user_ids,
+                open_adjustment_user_ids,
+            )
+            settled_adjustments = await self.base_runtime.database.settle_payout_adjustments(
+                adjustment_user_ids if adjustment_user_ids is not None else None,
+                str(interaction.user.id),
+                getattr(interaction.user, "display_name", interaction.user.name),
+                "reset_mark_paid",
+            )
         await self._clear_reset_sessions(scope.mode, scope.user_ids)
         completion = (
             f"{_reset_scope_action(scope.mode, scope.user_ids, action)}.\n"
             f"{updated} active receipt(s) updated.\n"
+            f"{settled_adjustments} payout adjustment(s) settled.\n"
             f"Backup saved to `{path}`\n"
             f"Previous summary:\n{summary}"
         )
@@ -4551,6 +4575,7 @@ class BakunawaMechDiscordClient(discord.Client):
         main_channel = self.get_channel(main_channel_id)
         notice = (
             f"{_reset_scope_action(scope.mode, scope.user_ids, action)} by <@{interaction.user.id}>.\n"
+            f"Payout adjustments settled: {settled_adjustments}\n"
             f"Backup saved to `{path}`\n"
             f"Previous summary:\n{summary}"
         )
@@ -5236,6 +5261,50 @@ class BakunawaMechDiscordClient(discord.Client):
             await self._run_slash_command(
                 interaction,
                 _build_slash_input("mechpayouts", _member_token(user)),
+            )
+
+        @self.tree.command(
+            name="mechpayoutoffset",
+            description="Add a payout-time credit or deduction for one user.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(
+            user="User receiving the payout adjustment.",
+            amount="Use a positive value to add or a negative value to deduct.",
+            reason="Optional note explaining the adjustment.",
+        )
+        async def mechpayoutoffset(
+            interaction: discord.Interaction[Any],
+            user: discord.Member,
+            amount: str,
+            reason: str | None = None,
+        ) -> None:
+            await self._run_slash_command(
+                interaction,
+                _build_slash_input("mechpayoutoffset", _member_token(user), amount, reason),
+            )
+
+        @self.tree.command(
+            name="mechpayoutsplit",
+            description="Split one user's current payout across other staff.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(
+            source="User whose current payout should be split.",
+            recipients="Use `everyone` or mention users separated by spaces.",
+            reason="Optional note explaining the split.",
+        )
+        async def mechpayoutsplit(
+            interaction: discord.Interaction[Any],
+            source: discord.Member,
+            recipients: str,
+            reason: str | None = None,
+        ) -> None:
+            await self._run_slash_command(
+                interaction,
+                _build_slash_input("mechpayoutsplit", _member_token(source), recipients, reason),
             )
 
         @self.tree.command(
@@ -6498,6 +6567,33 @@ def _reset_scope_matches(mode: ResetMode, user_ids: list[int], creator_user_id: 
     if mode is ResetMode.ONLY:
         return creator_id in user_ids
     return creator_id is None or creator_id not in user_ids
+
+
+def _reset_adjustment_target_user_ids(
+    mode: ResetMode,
+    user_ids: list[int],
+    open_adjustment_user_ids: list[str],
+) -> list[str] | None:
+    if mode is ResetMode.ALL:
+        return None
+    targeted_ids = {str(user_id) for user_id in user_ids}
+    if mode is ResetMode.ONLY:
+        return [user_id for user_id in open_adjustment_user_ids if user_id in targeted_ids]
+    return [user_id for user_id in open_adjustment_user_ids if user_id not in targeted_ids]
+
+
+def _reset_adjustment_snapshot_matches_scope(
+    audit_event: AuditEvent,
+    mode: ResetMode,
+    user_ids: list[int],
+) -> bool:
+    if audit_event.action != "payout_adjustment_snapshot":
+        return False
+    detail = dict(audit_event.detail_json)
+    adjustment_user_id = detail.get("user_id")
+    if adjustment_user_id is None or detail.get("settled_at") is not None:
+        return False
+    return _reset_scope_matches(mode, user_ids, str(adjustment_user_id))
 
 
 def _reset_progress_message(mode: ResetMode, user_ids: list[int], action: ResetAction) -> str:

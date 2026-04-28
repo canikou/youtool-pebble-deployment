@@ -19,6 +19,7 @@ from yt_assist.domain.templates import (
     reload as reload_templates,
 )
 
+from .command_support import parse_signed_amount_cents_text, parse_user_token
 from .render import (
     ReplyPayload,
     health_embed,
@@ -115,6 +116,8 @@ PREFIX_COMMAND_ALIASES: dict[str, str] = {
     "stats": "stats",
     "pricesheet": "pricesheet",
     "payouts": "payouts",
+    "payoutoffset": "payoutoffset",
+    "payoutsplit": "payoutsplit",
     "refresh": "refresh",
     "templates": "templates",
     "export": "export",
@@ -126,6 +129,8 @@ SLASH_COMMAND_ALIASES: dict[str, str] = {
     "mechstats": "stats",
     "mechpricesheet": "pricesheet",
     "mechpayouts": "payouts",
+    "mechpayoutoffset": "payoutoffset",
+    "mechpayoutsplit": "payoutsplit",
     "mechrefresh": "refresh",
     "mechtemplates": "templates",
     "mechexport": "export",
@@ -264,11 +269,199 @@ async def _handle_pricesheet(ctx: CommandContext, args: list[str]) -> CommandRes
 async def _handle_payouts(ctx: CommandContext, args: list[str]) -> CommandResult:
     await _ensure_admin(ctx)
     await _ensure_admin_channel(ctx)
-    target_user_id = args[0] if args else None
+    target_user_id = None
+    if args:
+        parsed_user_id = parse_user_token(args[0])
+        target_user_id = str(parsed_user_id) if parsed_user_id is not None else args[0]
     entries = await ctx.runtime.database.payouts(target_user_id)
     events = _cleanup_prefix_invocation_events(ctx)
     events.append(_send(ReplyPayload(embeds=[payouts_embed(entries)], ephemeral=ctx.is_interaction)))
     return CommandResult(canonical_name="payouts", events=events)
+
+
+async def _handle_payoutoffset(ctx: CommandContext, args: list[str]) -> CommandResult:
+    await _ensure_admin(ctx)
+    await _ensure_admin_channel(ctx)
+    try:
+        user_id, amount_cents, reason = _parse_payout_offset_args(args)
+    except ValueError as error:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutoffset",
+                events=[_send(_error_reply(ctx, "Bakunawa Mech Payout Offset", str(error)))],
+            )
+        ) from error
+    existing_entries = await ctx.runtime.database.payouts(user_id)
+    display_name = existing_entries[0].display_name if existing_entries else user_id
+    inserted = await ctx.runtime.database.apply_payout_adjustments(
+        [(user_id, display_name, amount_cents, reason, None, None)],
+        str(ctx.actor.user_id),
+        ctx.actor.display_name,
+    )
+    updated_entries = await ctx.runtime.database.payouts(user_id)
+    updated_total = updated_entries[0].adjusted_total_payout_cents if updated_entries else amount_cents
+    description = (
+        f"Applied {inserted} payout adjustment for <@{user_id}>.\n"
+        f"Amount: {_format_signed_amount_cents(amount_cents)}\n"
+        f"Reason: {reason}\n"
+        f"Updated final payout: ${_format_amount_cents(updated_total)}"
+    )
+    events = _cleanup_prefix_invocation_events(ctx)
+    events.append(
+        _send(
+            ReplyPayload(
+                embeds=[task_status_embed("Bakunawa Mech Payout Offset", description)],
+                ephemeral=ctx.is_interaction,
+            )
+        )
+    )
+    return CommandResult(canonical_name="payoutoffset", events=events)
+
+
+async def _handle_payoutsplit(ctx: CommandContext, args: list[str]) -> CommandResult:
+    await _ensure_admin(ctx)
+    await _ensure_admin_channel(ctx)
+    try:
+        source_user_id, recipient_user_ids, everyone_mode, reason = _parse_payout_split_args(args)
+    except ValueError as error:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutsplit",
+                events=[_send(_error_reply(ctx, "Bakunawa Mech Payout Split", str(error)))],
+            )
+        ) from error
+    entries = await ctx.runtime.database.payouts(None)
+    entry_by_user_id = {entry.user_id: entry for entry in entries}
+    source_entry = entry_by_user_id.get(source_user_id)
+    if source_entry is None:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutsplit",
+                events=[
+                    _send(
+                        _error_reply(
+                            ctx,
+                            "Bakunawa Mech Payout Split",
+                            f"No active payout was found for <@{source_user_id}>.",
+                        )
+                    )
+                ],
+            )
+        )
+
+    distributable_cents = source_entry.adjusted_total_payout_cents
+    if distributable_cents <= 0:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutsplit",
+                events=[
+                    _send(
+                        _error_reply(
+                            ctx,
+                            "Bakunawa Mech Payout Split",
+                            f"<@{source_user_id}> has no positive payout left to split.",
+                        )
+                    )
+                ],
+            )
+        )
+
+    if everyone_mode:
+        target_user_ids = [entry.user_id for entry in entries if entry.user_id != source_user_id]
+    else:
+        target_user_ids = recipient_user_ids
+    target_user_ids = [user_id for user_id in target_user_ids if user_id != source_user_id]
+    target_user_ids = list(dict.fromkeys(target_user_ids))
+    if not target_user_ids:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutsplit",
+                events=[
+                    _send(
+                        _error_reply(
+                            ctx,
+                            "Bakunawa Mech Payout Split",
+                            "No recipient users were found for this split.",
+                        )
+                    )
+                ],
+            )
+        )
+
+    target_count = len(target_user_ids)
+    base_share = distributable_cents // target_count
+    remainder = distributable_cents % target_count
+    split_reason = reason or f"Split from {source_entry.display_name}"
+    adjustments: list[tuple[str, str, int, str, str | None, str | None]] = [
+        (
+            source_user_id,
+            source_entry.display_name,
+            -distributable_cents,
+            split_reason,
+            source_user_id,
+            source_entry.display_name,
+        )
+    ]
+    per_user_lines: list[str] = []
+    for index, user_id in enumerate(target_user_ids):
+        share_cents = base_share + (1 if index < remainder else 0)
+        if share_cents <= 0:
+            continue
+        display_name = entry_by_user_id.get(user_id, None).display_name if user_id in entry_by_user_id else user_id
+        adjustments.append(
+            (
+                user_id,
+                display_name,
+                share_cents,
+                split_reason,
+                source_user_id,
+                source_entry.display_name,
+            )
+        )
+        per_user_lines.append(f"<@{user_id}>: +${_format_amount_cents(share_cents)}")
+    if len(adjustments) <= 1:
+        raise _handled(
+            CommandResult(
+                canonical_name="payoutsplit",
+                events=[
+                    _send(
+                        _error_reply(
+                            ctx,
+                            "Bakunawa Mech Payout Split",
+                            "The current payout is too small to split across that many recipients.",
+                        )
+                    )
+                ],
+            )
+        )
+
+    inserted = await ctx.runtime.database.apply_payout_adjustments(
+        adjustments,
+        str(ctx.actor.user_id),
+        ctx.actor.display_name,
+    )
+    description = (
+        f"Split ${_format_amount_cents(distributable_cents)} from <@{source_user_id}>.\n"
+        f"Recipients: {len(per_user_lines)}\n"
+        f"Source offset: -${_format_amount_cents(distributable_cents)}\n"
+        f"Reason: {split_reason}\n"
+        + "\n".join(per_user_lines)
+    )
+    events = _cleanup_prefix_invocation_events(ctx)
+    events.append(
+        _send(
+            ReplyPayload(
+                embeds=[
+                    task_status_embed(
+                        "Bakunawa Mech Payout Split",
+                        f"{description}\nCreated adjustment rows: {inserted}",
+                    )
+                ],
+                ephemeral=ctx.is_interaction,
+            )
+        )
+    )
+    return CommandResult(canonical_name="payoutsplit", events=events)
 
 
 async def _handle_refresh(ctx: CommandContext, args: list[str]) -> CommandResult:
@@ -606,10 +799,69 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "stats": _handle_stats,
     "pricesheet": _handle_pricesheet,
     "payouts": _handle_payouts,
+    "payoutoffset": _handle_payoutoffset,
+    "payoutsplit": _handle_payoutsplit,
     "refresh": _handle_refresh,
     "templates": _handle_templates,
     "export": _handle_export,
 }
+
+
+def _parse_payout_offset_args(args: list[str]) -> tuple[str, int, str]:
+    if len(args) < 2:
+        raise ValueError("Use `bm!payoutoffset @user <amount> [reason]`.")
+    parsed_user_id = parse_user_token(args[0])
+    if parsed_user_id is None:
+        raise ValueError("The first argument must be a user mention or numeric user ID.")
+    amount_cents = parse_signed_amount_cents_text(args[1])
+    reason = " ".join(args[2:]).strip() or "Manual payout adjustment"
+    return str(parsed_user_id), amount_cents, reason
+
+
+def _parse_payout_split_args(args: list[str]) -> tuple[str, list[str], bool, str]:
+    if len(args) < 2:
+        raise ValueError("Use `bm!payoutsplit @source everyone|@user... [reason]`.")
+    parsed_source_user_id = parse_user_token(args[0])
+    if parsed_source_user_id is None:
+        raise ValueError("The first argument must be the source user mention or numeric user ID.")
+    source_user_id = str(parsed_source_user_id)
+
+    if args[1].lower() == "everyone":
+        reason = " ".join(args[2:]).strip()
+        return source_user_id, [], True, reason
+
+    recipient_user_ids: list[str] = []
+    reason_index = 1
+    for index, token in enumerate(args[1:], start=1):
+        parsed_user_id = parse_user_token(token)
+        if parsed_user_id is None:
+            reason_index = index
+            break
+        recipient_user_id = str(parsed_user_id)
+        if recipient_user_id != source_user_id and recipient_user_id not in recipient_user_ids:
+            recipient_user_ids.append(recipient_user_id)
+        reason_index = index + 1
+
+    if not recipient_user_ids:
+        raise ValueError("Add at least one recipient mention or use `everyone`.")
+    reason = " ".join(args[reason_index:]).strip()
+    return source_user_id, recipient_user_ids, False, reason
+
+
+def _format_amount_cents(amount_cents: int) -> str:
+    absolute = abs(amount_cents)
+    whole = absolute // 100
+    cents = absolute % 100
+    if cents:
+        return f"{whole:,}.{cents:02d}"
+    return f"{whole:,}"
+
+
+def _format_signed_amount_cents(amount_cents: int) -> str:
+    if amount_cents == 0:
+        return "$0"
+    sign = "+" if amount_cents > 0 else "-"
+    return f"{sign}${_format_amount_cents(amount_cents)}"
 
 
 def _levenshtein(left: str, right: str) -> int:

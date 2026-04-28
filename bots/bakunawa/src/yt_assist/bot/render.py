@@ -260,7 +260,14 @@ def render_payout_description(entries: list[PayoutEntry]) -> str:
         return "No unpaid receipts waiting for payout."
     lines: list[str] = []
     for index, entry in enumerate(entries, start=1):
-        lines.append(f"{index}. <@{entry.user_id}> | Pay: **${format_money_cents(entry.total_payout_cents)}**")
+        if entry.adjustment_cents:
+            lines.append(
+                f"{index}. <@{entry.user_id}> | Raw ${format_money_cents(entry.total_payout_cents)} | "
+                f"Offset {_format_signed_money_cents(entry.adjustment_cents)} | "
+                f"Final **${format_money_cents(entry.adjusted_total_payout_cents)}**"
+            )
+            continue
+        lines.append(f"{index}. <@{entry.user_id}> | Final **${format_money_cents(entry.adjusted_total_payout_cents)}**")
     return "\n".join(lines)
 
 
@@ -300,6 +307,14 @@ def format_money_cents(amount_cents: int) -> str:
     if cents:
         return f"{prefix}{format_money(whole)}.{cents:02d}"
     return f"{prefix}{format_money(whole)}"
+
+
+def _format_signed_money_cents(amount_cents: int) -> str:
+    if amount_cents == 0:
+        return "$0"
+    if amount_cents > 0:
+        return f"+${format_money_cents(amount_cents)}"
+    return f"-${format_money_cents(abs(amount_cents))}"
 
 
 def _staff_payout_cents(profit: int) -> int:
@@ -354,6 +369,8 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             (
                 f"`{prefix}manage` / `/mechmanage` - Open the receipt manager\n"
                 f"`{prefix}payouts` / `/mechpayouts` - Show staff payout totals\n"
+                f"`{prefix}payoutoffset` / `/mechpayoutoffset` - Add a payout-time credit or deduction\n"
+                f"`{prefix}payoutsplit` / `/mechpayoutsplit` - Split one user's payout across other staff\n"
                 f"`{prefix}refresh` / `/mechrefresh` - Reload catalog and package files from disk\n"
                 f"`{prefix}templates [reload]` / `/mechtemplates [reload]` - Show live announcement commands or reload the templates JSON\n"
                 f"`{prefix}reset` / `/mechreset` - Backup active receipts, then mark them paid or invalidate them\n"
@@ -399,7 +416,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
             False,
         ).field(
             "Permissions",
-            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `fixpreviews`, `clean`, `restartbot`, `stop`",
+            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `payoutoffset`, `payoutsplit`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `fixpreviews`, `clean`, `restartbot`, `stop`",
             False,
         )
     return embed.with_footer(f"Page {page + 1}/{HELP_PAGE_COUNT} • Use Prev/Next to browse.")
@@ -469,15 +486,19 @@ def stats_embed(sort: StatsSort, entries: list[LeaderboardEntry]) -> EmbedPayloa
 
 def payouts_embed(entries: list[PayoutEntry]) -> EmbedPayload:
     total_payout_cents = sum(entry.total_payout_cents for entry in entries)
+    total_adjustment_cents = sum(entry.adjustment_cents for entry in entries)
+    adjusted_total_payout_cents = sum(entry.adjusted_total_payout_cents for entry in entries)
     total_profit = sum(entry.profit for entry in entries)
     company_net_profit_after_staff_payout = _company_net_profit_after_staff_payout_cents(
         total_profit,
-        total_payout_cents,
+        adjusted_total_payout_cents,
     )
     embed = (
         panel_embed("Bakunawa Mech Payouts", render_payout_description(entries))
         .field("Employees", str(len(entries)), True)
-        .field("Total Staff Payout", f"${format_money_cents(total_payout_cents)}", True)
+        .field("Raw Staff Payout", f"${format_money_cents(total_payout_cents)}", True)
+        .field("Net Adjustments", _format_signed_money_cents(total_adjustment_cents), True)
+        .field("Final Staff Payout", f"${format_money_cents(adjusted_total_payout_cents)}", True)
         .field(
             "Company Net Profit",
             f"${format_money_cents(company_net_profit_after_staff_payout)}",

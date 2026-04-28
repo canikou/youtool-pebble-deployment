@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from yt_assist.domain.catalog import Catalog
 from yt_assist.domain.models import DraftItem
@@ -37,6 +38,26 @@ def parse_positive_amount_text(input_text: str) -> int:
     if amount <= 0:
         raise ValueError("Amount must be greater than 0.")
     return amount
+
+
+def parse_signed_amount_cents_text(input_text: str) -> int:
+    cleaned = (
+        input_text.strip()
+        .replace("$", "")
+        .replace(",", "")
+        .replace("_", "")
+        .replace(" ", "")
+    )
+    if not cleaned:
+        raise ValueError("Amount is required.")
+    try:
+        amount = Decimal(cleaned)
+    except InvalidOperation as error:
+        raise ValueError("Amount must be a valid number.") from error
+    cents = int((amount * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    if cents == 0:
+        raise ValueError("Amount must not be zero.")
+    return cents
 
 
 def parse_user_token(token: str) -> int | None:
