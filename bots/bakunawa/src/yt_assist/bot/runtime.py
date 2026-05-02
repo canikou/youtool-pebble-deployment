@@ -1293,6 +1293,8 @@ class BakunawaMechDiscordClient(discord.Client):
 
         if respect_active_session and await self._has_active_session_in_channel(channel_id):
             channel = self.get_channel(channel_id)
+            if channel_role == "admin":
+                return
             if isinstance(channel, discord.TextChannel):
                 for message_id in [
                     self._stats_message_ids.pop(channel_id, None),
@@ -1323,6 +1325,36 @@ class BakunawaMechDiscordClient(discord.Client):
             if not isinstance(fetched_channel, discord.TextChannel):
                 return
             channel = fetched_channel
+
+        if channel_role == "admin":
+            status_payload = embed_from_payload(
+                lifecycle_status_embed(
+                    status.kind.value,
+                    status.description,
+                    channel_role=channel_role,
+                )
+            )
+            existing_message: discord.Message | None = None
+            message_id = self._status_message_ids.get(channel_id)
+            if message_id is not None:
+                try:
+                    existing_message = await channel.fetch_message(message_id)
+                except (discord.HTTPException, discord.NotFound):
+                    existing_message = None
+            if existing_message is None:
+                existing = await self._collect_lifecycle_card_messages(channel)
+                existing_message = existing[0] if existing else None
+            if existing_message is not None:
+                await existing_message.edit(embed=status_payload, allowed_mentions=discord.AllowedMentions.none())
+                self._status_message_ids[channel_id] = existing_message.id
+            else:
+                status_message = await channel.send(
+                    embed=status_payload,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self._status_message_ids[channel_id] = status_message.id
+            self._stats_message_ids.pop(channel_id, None)
+            return
 
         existing = await self._collect_lifecycle_card_messages(channel)
         for message in existing:
@@ -1534,6 +1566,25 @@ class BakunawaMechDiscordClient(discord.Client):
     def _is_admin_messageable_channel(self, channel: discord.abc.MessageableChannel) -> bool:
         return self._is_admin_channel_id(_configured_parent_channel_id(channel))
 
+    def _is_zero_delete_channel(self, channel: discord.abc.MessageableChannel | None) -> bool:
+        if channel is None:
+            return False
+        return self._is_admin_channel_id(_configured_parent_channel_id(channel))
+
+    async def _delete_message_if_allowed(self, message: discord.Message | None) -> None:
+        if message is None or self._is_zero_delete_channel(message.channel):
+            return
+        await _safe_delete_message(message)
+
+    def _schedule_delete_message_if_allowed(
+        self,
+        message: discord.Message | None,
+        after_seconds: int,
+    ) -> None:
+        if message is None or self._is_zero_delete_channel(message.channel):
+            return
+        self._track_task(_safe_delete_message_later(message, after_seconds))
+
     def _is_admin_user(self, user_id: int) -> bool:
         return user_id in self.base_runtime.config.discord.admin_user_ids
 
@@ -1720,6 +1771,18 @@ class BakunawaMechDiscordClient(discord.Client):
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot."))]
             )
             return
+        if self._is_admin_messageable_channel(message.channel):
+            await message.channel.send(
+                embeds=[
+                    embed_from_payload(
+                        task_error_embed(
+                            "Bakunawa Mech Clean",
+                            "Zero-deletion policy is enabled in the admin channel. Use `bm!cleanlog` for the main channel instead.",
+                        )
+                    )
+                ]
+            )
+            return
         if not self._is_scoped_messageable_channel(message.channel):
             await message.channel.send(
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This command is not enabled in this channel."))]
@@ -1739,11 +1802,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
             ]
         )
-        self._track_task(
-            _safe_delete_message_later(
-                progress,
-                self.base_runtime.config.discord.transient_message_timeout_seconds,
-            )
+        self._schedule_delete_message_if_allowed(
+            progress,
+            self.base_runtime.config.discord.transient_message_timeout_seconds,
         )
 
     async def _run_clean_log_prefix(self, message: discord.Message) -> None:
@@ -1771,11 +1832,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
             ]
         )
-        self._track_task(
-            _safe_delete_message_later(
-                progress,
-                self.base_runtime.config.discord.transient_message_timeout_seconds,
-            )
+        self._schedule_delete_message_if_allowed(
+            progress,
+            self.base_runtime.config.discord.transient_message_timeout_seconds,
         )
 
     async def _run_note_prefix(self, message: discord.Message, remainder: str) -> None:
@@ -1813,7 +1872,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Receipt Note", f"Receipt `{receipt_id}` was not found."))]
             )
             return
-        await _safe_delete_message(message)
+        await self._delete_message_if_allowed(message)
         reply = await message.channel.send(
             embeds=[
                 embed_from_payload(
@@ -1824,11 +1883,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
             ]
         )
-        self._track_task(
-            _safe_delete_message_later(
-                reply,
-                self.base_runtime.config.discord.transient_message_timeout_seconds,
-            )
+        self._schedule_delete_message_if_allowed(
+            reply,
+            self.base_runtime.config.discord.transient_message_timeout_seconds,
         )
 
     async def _run_restart_prefix(self, message: discord.Message) -> None:
@@ -5279,13 +5336,15 @@ class BakunawaMechDiscordClient(discord.Client):
 
     async def _delete_target(self, dispatch: DiscordDispatchContext, target: str | None) -> None:
         if target == "invocation" and dispatch.invocation_message is not None:
-            await _safe_delete_message(dispatch.invocation_message)
+            await self._delete_message_if_allowed(dispatch.invocation_message)
             return
         if target == "reply":
             if dispatch.reply_message is not None:
-                await _safe_delete_message(dispatch.reply_message)
+                await self._delete_message_if_allowed(dispatch.reply_message)
                 return
             if dispatch.interaction is not None:
+                if self._is_zero_delete_channel(dispatch.interaction.channel):
+                    return
                 try:
                     await dispatch.interaction.delete_original_response()
                 except (discord.HTTPException, discord.NotFound):
