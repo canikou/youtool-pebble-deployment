@@ -39,7 +39,6 @@ from yt_assist.domain.models import (
     PricingSource,
     ReceiptAccountingRecord,
     ReceiptStatus,
-    StatsSort,
     utcnow,
 )
 from yt_assist.domain.packages import PackageExpansion, PackageSelection, append_unique_items, expand_package
@@ -84,8 +83,8 @@ from .render import (
     help_action_rows,
     help_page_embed,
     lifecycle_status_embed,
-    lifecycle_stats_embed,
     manage_page_parts,
+    payouts_embed,
     receipt_detail_payload,
     receipt_log_payload,
     receipt_main_payload,
@@ -1328,9 +1327,9 @@ class BakunawaMechDiscordClient(discord.Client):
 
         stats_message: discord.Message | None = None
         if channel_role == "log":
-            entries = await self.base_runtime.database.leaderboard(StatsSort.SALES)
+            entries = await self.base_runtime.database.payouts(None)
             stats_message = await channel.send(
-                embed=embed_from_payload(lifecycle_stats_embed(entries)),
+                embed=embed_from_payload(payouts_embed(entries)),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         status_message = await channel.send(
@@ -6601,7 +6600,9 @@ def _is_lifecycle_status_message(message: discord.Message) -> bool:
 
 
 def _is_lifecycle_stats_message(message: discord.Message) -> bool:
-    return any(embed.title == "Bakunawa Mech Live Stats" for embed in message.embeds)
+    return any(
+        embed.title in {"Bakunawa Mech Live Stats", "Bakunawa Mech Payouts"} for embed in message.embeds
+    )
 
 
 def _is_lifecycle_card_message(message: discord.Message) -> bool:
