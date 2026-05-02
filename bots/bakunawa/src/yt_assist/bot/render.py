@@ -27,6 +27,7 @@ THEME_WARNING = 0xD97706
 THEME_ERROR = 0xC1121F
 THEME_LIFECYCLE_ONLINE = 0x7C3AED
 LIFECYCLE_STATUS_TITLE = "Bakunawa Mech Status"
+LIFECYCLE_STATS_TITLE = "Bakunawa Mech Live Stats"
 HELP_PAGE_COUNT = 4
 STAFF_PAYOUT_PERCENT = 60
 STAFF_PAYOUT_BPS = STAFF_PAYOUT_PERCENT * 100
@@ -210,7 +211,7 @@ def error_panel_embed(title: str, description: str) -> EmbedPayload:
     return EmbedPayload(title=title, description=description, color=THEME_ERROR)
 
 
-def lifecycle_status_embed(state: str, description: str) -> EmbedPayload:
+def lifecycle_status_embed(state: str, description: str, *, channel_role: str = "main") -> EmbedPayload:
     normalized = state.strip().lower()
     if normalized in {"starting", "starting_up"}:
         label = "Starting Up"
@@ -225,12 +226,30 @@ def lifecycle_status_embed(state: str, description: str) -> EmbedPayload:
         label = "Shutting Down"
         color = THEME_WARNING
 
-    common_commands = (
-        "`bm!calc` - create a new order\n"
-        "`bm!stats` - view all employee's stats\n"
-        "`bm!templates` - view current templates\n"
-        "`bm!pricesheet` - view pricesheet"
-    )
+    if channel_role == "admin":
+        field_name = "Admin Commands"
+        field_value = (
+            "`bm!manage` - open receipt manager\n"
+            "`bm!payouts` - view payout totals\n"
+            "`bm!reset` - close out active receipts\n"
+            "`bm!rebuildlogs` - rebuild log threads"
+        )
+    elif channel_role == "log":
+        field_name = "Log Commands"
+        field_value = (
+            "`bm!stats` - view all employee stats\n"
+            "`bm!fixpreviews` - repair proof previews\n"
+            "`bm!rebuildlogs` - rebuild log threads\n"
+            "`bm!cleanlog` - clean log-channel clutter"
+        )
+    else:
+        field_name = "Common Commands"
+        field_value = (
+            "`bm!calc` - create a new order\n"
+            "`bm!stats` - view all employee's stats\n"
+            "`bm!templates` - view current templates\n"
+            "`bm!pricesheet` - view pricesheet"
+        )
 
     return (
         EmbedPayload(
@@ -239,7 +258,41 @@ def lifecycle_status_embed(state: str, description: str) -> EmbedPayload:
             color=color,
         )
         .field("State", label, True)
-        .field("Common Commands", common_commands, False)
+        .field(field_name, field_value, False)
+    )
+
+
+def lifecycle_stats_embed(entries: list[LeaderboardEntry]) -> EmbedPayload:
+    total_sales = sum(entry.total_sales for entry in entries)
+    total_company_cost = sum(entry.procurement_cost for entry in entries)
+    total_profit = total_sales - total_company_cost
+    total_receipts = sum(entry.receipt_count for entry in entries)
+    top_lines = (
+        "No receipts counted in stats yet."
+        if not entries
+        else "\n".join(
+            f"{index}. <@{entry.user_id}> | Sales ${format_money(entry.total_sales)} | Receipts {entry.receipt_count}"
+            for index, entry in enumerate(entries[:5], start=1)
+        )
+    )
+    return (
+        EmbedPayload(
+            title=LIFECYCLE_STATS_TITLE,
+            description=top_lines,
+            color=THEME_INFO,
+        )
+        .field("Employees", str(len(entries)), True)
+        .field("Receipts", str(total_receipts), True)
+        .field("Gross Profit", f"${format_money(total_profit)}", True)
+        .field(
+            "Totals",
+            (
+                f"Total Sales ${format_money(total_sales)}\n"
+                f"Company Cost ${format_money(total_company_cost)}\n"
+                f"Total Staff Payout ${format_money_cents(_staff_payout_cents(total_profit))}"
+            ),
+            False,
+        )
     )
 
 
@@ -378,6 +431,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}import [file] [mode]` / `/mechimport` - Import a reviewed export\n"
                 f"`{prefix}rebuildlogs` / `/mechrebuildlogs` - Rebuild the receipt log channel from the database\n"
                 f"`{prefix}fixpreviews` / `/mechfixpreviews` - Refresh old proof previews from saved files\n"
+                f"`{prefix}cleanlog` / `/mechcleanlog` - Clean top-level clutter from the log channel\n"
                 f"`{prefix}clean` / `/mechclean` - Delete non-log messages from the current channel or thread\n"
                 f"`{prefix}restartbot` / `/mechrestartbot` - Restart the bot remotely\n"
                 f"`{prefix}stop` / `/mechstop` - Shut the bot down gracefully"
@@ -410,13 +464,12 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 "Use Add Individual Items for one-off upgrades or materials.\n"
                 "`[TIER 1] Full Cosmetics` lists vehicle-specific Cosmetic Parts and Extras Kit usage as `??x`.\n"
                 "`[TIER 3] Full Tuning + Engine` inherits existing Full Tuning selections when present.\n"
-                "`Nitrous` remains visible as a pricing placeholder until the catalog price is filled.\n"
                 f"`{prefix}calc @user` lets an admin record a receipt on someone else's behalf."
             ),
             False,
         ).field(
             "Permissions",
-            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `payoutoffset`, `payoutsplit`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `fixpreviews`, `clean`, `restartbot`, `stop`",
+            "Everyone: `calc`, `stats`, `pricesheet`, `note`, `help`, `health`\nAdmins only: `manage`, `payouts`, `payoutoffset`, `payoutsplit`, `refresh`, `templates`, `reset`, `export`, `import`, `rebuildlogs`, `fixpreviews`, `cleanlog`, `clean`, `restartbot`, `stop`",
             False,
         )
     return embed.with_footer(f"Page {page + 1}/{HELP_PAGE_COUNT} • Use Prev/Next to browse.")
@@ -645,8 +698,8 @@ def calc_timeout_warning_embed(catalog_items: list[CatalogItem], session) -> Emb
     return calc_embed_for_status(
         catalog_items,
         session,
-        "This receipt will close in 1 minute unless you confirm you are still working.",
-        "Choose Still Working to keep this receipt open, or Close Receipt to remove it now.",
+        f"Idle warning. {session_timeout_prompt(session)} Continue within 10 minutes or this receipt will close.",
+        "Choose Still Working to reset the idle timer, or Close Receipt to remove it now.",
         THEME_WARNING,
     )
 
@@ -756,6 +809,18 @@ def session_proof_status(session) -> str:
     if count == 1:
         return "Attached (1 image)"
     return f"Attached ({count} images)"
+
+
+def session_timeout_prompt(session) -> str:
+    if getattr(session, "awaiting_proof", False):
+        return "This receipt is waiting for proof upload."
+    if getattr(session, "proof_processing", False):
+        return "This receipt is finishing proof processing."
+    if getattr(session, "rescan_active", False):
+        return "This receipt is reviewing a rescan candidate."
+    if not getattr(session, "items", []):
+        return "This receipt is still waiting for package or item selection."
+    return "This receipt is waiting for final review or Print Receipt."
 
 
 def calc_action_rows(

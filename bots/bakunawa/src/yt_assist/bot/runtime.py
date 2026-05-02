@@ -39,6 +39,7 @@ from yt_assist.domain.models import (
     PricingSource,
     ReceiptAccountingRecord,
     ReceiptStatus,
+    StatsSort,
     utcnow,
 )
 from yt_assist.domain.packages import PackageExpansion, PackageSelection, append_unique_items, expand_package
@@ -83,6 +84,7 @@ from .render import (
     help_action_rows,
     help_page_embed,
     lifecycle_status_embed,
+    lifecycle_stats_embed,
     manage_page_parts,
     receipt_detail_payload,
     receipt_log_payload,
@@ -99,6 +101,7 @@ STATUS_SCAN_LIMIT = 1_000
 STATUS_REPOST_DEBOUNCE_SECONDS = 5
 STATUS_REPOST_FALLBACK_INTERVAL_SECONDS = 60
 TOPIC_HEARTBEAT_INTERVAL_SECONDS = 600
+LOG_CHANNEL_CLEANUP_INTERVAL_SECONDS = 3600
 LOCAL_STOP_SIGNAL_FILE = "bakunawa-mech.stop"
 CALCULATOR_THREAD_PREFIX = "BM Calc - "
 RECEIPT_LOG_THREAD_PREFIX = "BM Logs - "
@@ -848,7 +851,9 @@ class BakunawaMechDiscordClient(discord.Client):
         self._ready_announced = False
         self._main_status: LifecycleStatusState | None = None
         self._admin_status: LifecycleStatusState | None = None
+        self._log_status: LifecycleStatusState | None = None
         self._status_message_ids: dict[int, int] = {}
+        self._stats_message_ids: dict[int, int] = {}
         self._status_refresh_deadlines: dict[int, float] = {}
         self._status_refresh_tasks: dict[int, asyncio.Task[Any]] = {}
         self._channel_topics: dict[int, str] = {}
@@ -874,6 +879,7 @@ class BakunawaMechDiscordClient(discord.Client):
             self._track_task(self._monitor_help_panels())
             self._track_task(self._monitor_lifecycle_status_messages())
             self._track_task(self._monitor_channel_heartbeat())
+            self._track_task(self._monitor_log_channel_cleanup())
             self._track_task(self._monitor_local_stop_signal())
         LOGGER.info("connected to Discord as %s (%s)", user.name, user.id)
         if not self._ready_announced:
@@ -981,6 +987,9 @@ class BakunawaMechDiscordClient(discord.Client):
             if command_name == "clean":
                 await self._run_clean_prefix(message)
                 return
+            if command_name == "cleanlog":
+                await self._run_clean_log_prefix(message)
+                return
             if command_name == "note":
                 await self._run_note_prefix(message, remainder)
                 return
@@ -1018,6 +1027,10 @@ class BakunawaMechDiscordClient(discord.Client):
             kind=LifecycleStatusKind.STARTING,
             description="Bot is starting up. Command registration and readiness checks are in progress...",
         )
+        self._log_status = LifecycleStatusState(
+            kind=LifecycleStatusKind.STARTING,
+            description="Receipt log threads are starting up. Status and stats will refresh shortly.",
+        )
         self._main_status = LifecycleStatusState(
             kind=LifecycleStatusKind.STARTING,
             description="The calculator bot is starting up. Commands will be available in a moment.",
@@ -1032,6 +1045,13 @@ class BakunawaMechDiscordClient(discord.Client):
                 "Bot is fully online, ready to calculate!\n\n"
                 f"{prefix}payouts to see current staff payouts. "
                 f"{prefix}reset to mark active receipts paid or invalidate them."
+            ),
+        )
+        self._log_status = LifecycleStatusState(
+            kind=LifecycleStatusKind.ONLINE,
+            description=(
+                "Receipt logs are online and grouped into employee threads.\n\n"
+                f"{prefix}cleanlog keeps the parent log channel tidy."
             ),
         )
         self._main_status = LifecycleStatusState(
@@ -1093,6 +1113,10 @@ class BakunawaMechDiscordClient(discord.Client):
             kind=LifecycleStatusKind.STOPPING,
             description=admin_reason,
         )
+        self._log_status = LifecycleStatusState(
+            kind=LifecycleStatusKind.STOPPING,
+            description="Receipt logging is shutting down now.",
+        )
         self._main_status = LifecycleStatusState(
             kind=LifecycleStatusKind.STOPPING,
             description=main_reason,
@@ -1114,6 +1138,10 @@ class BakunawaMechDiscordClient(discord.Client):
         self._admin_status = LifecycleStatusState(
             kind=LifecycleStatusKind.STOPPED,
             description=admin_reason,
+        )
+        self._log_status = LifecycleStatusState(
+            kind=LifecycleStatusKind.STOPPED,
+            description="Receipt logging is offline. Start the runner again to restore thread logging.",
         )
         self._main_status = LifecycleStatusState(
             kind=LifecycleStatusKind.STOPPED,
@@ -1145,9 +1173,17 @@ class BakunawaMechDiscordClient(discord.Client):
             for channel in (
                 self._configured_main_channel_id(),
                 self._configured_admin_channel_id(),
+                self.base_runtime.config.discord.receipt_log_channel_id,
             )
             if channel is not None
         }
+
+    def _lifecycle_channel_role(self, channel_id: int) -> str:
+        if channel_id in self.base_runtime.config.discord.admin_channel_ids:
+            return "admin"
+        if channel_id == self.base_runtime.config.discord.receipt_log_channel_id:
+            return "log"
+        return "main"
 
     async def _refresh_lifecycle_status_messages_now(
         self,
@@ -1158,17 +1194,25 @@ class BakunawaMechDiscordClient(discord.Client):
         async with self._lifecycle_refresh_lock:
             admin_channel_id = self._configured_admin_channel_id()
             main_channel_id = self._configured_main_channel_id()
+            log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
             if admin_channel_id is not None:
                 await self._refresh_lifecycle_status_message(
                     admin_channel_id,
-                    admin=True,
                     force=force,
                     respect_active_session=respect_active_session,
                 )
             if main_channel_id is not None and main_channel_id != admin_channel_id:
                 await self._refresh_lifecycle_status_message(
                     main_channel_id,
-                    admin=False,
+                    force=force,
+                    respect_active_session=respect_active_session,
+                )
+            if (
+                log_channel_id is not None
+                and log_channel_id not in {main_channel_id, admin_channel_id}
+            ):
+                await self._refresh_lifecycle_status_message(
+                    log_channel_id,
                     force=force,
                     respect_active_session=respect_active_session,
                 )
@@ -1177,7 +1221,7 @@ class BakunawaMechDiscordClient(discord.Client):
         channel_id = message.channel.id
         if not self._is_lifecycle_channel_id(channel_id):
             return
-        if _is_lifecycle_status_message(message):
+        if _is_lifecycle_card_message(message):
             return
         self._schedule_lifecycle_status_refresh(channel_id)
 
@@ -1193,6 +1237,19 @@ class BakunawaMechDiscordClient(discord.Client):
             task = self._track_task(self._debounced_lifecycle_status_refresh(channel_id))
             self._status_refresh_tasks[channel_id] = task
 
+    def _schedule_all_lifecycle_status_refreshes(
+        self,
+        *,
+        delay_seconds: float = STATUS_REPOST_DEBOUNCE_SECONDS,
+    ) -> None:
+        for channel_id in [
+            self._configured_main_channel_id(),
+            self._configured_admin_channel_id(),
+            self.base_runtime.config.discord.receipt_log_channel_id,
+        ]:
+            if channel_id is not None and channel_id > 0:
+                self._schedule_lifecycle_status_refresh(channel_id, delay_seconds=delay_seconds)
+
     async def _debounced_lifecycle_status_refresh(self, channel_id: int) -> None:
         try:
             while not self.is_closed():
@@ -1206,7 +1263,6 @@ class BakunawaMechDiscordClient(discord.Client):
                 self._status_refresh_deadlines.pop(channel_id, None)
                 await self._refresh_lifecycle_status_message(
                     channel_id,
-                    admin=self._is_admin_channel_id(channel_id),
                 )
                 return
         finally:
@@ -1218,20 +1274,30 @@ class BakunawaMechDiscordClient(discord.Client):
         self,
         channel_id: int,
         *,
-        admin: bool,
         force: bool = False,
         respect_active_session: bool = True,
     ) -> None:
-        status = self._admin_status if admin else self._main_status
+        channel_role = self._lifecycle_channel_role(channel_id)
+        if channel_role == "admin":
+            status = self._admin_status
+        elif channel_role == "log":
+            status = self._log_status
+        else:
+            status = self._main_status
         if status is None:
             self._status_message_ids.pop(channel_id, None)
+            self._stats_message_ids.pop(channel_id, None)
             return
 
         if respect_active_session and await self._has_active_session_in_channel(channel_id):
-            message_id = self._status_message_ids.pop(channel_id, None)
-            if message_id is not None:
-                channel = self.get_channel(channel_id)
-                if isinstance(channel, discord.TextChannel):
+            channel = self.get_channel(channel_id)
+            if isinstance(channel, discord.TextChannel):
+                for message_id in [
+                    self._stats_message_ids.pop(channel_id, None),
+                    self._status_message_ids.pop(channel_id, None),
+                ]:
+                    if message_id is None:
+                        continue
                     try:
                         message = await channel.fetch_message(message_id)
                     except (discord.HTTPException, discord.NotFound):
@@ -1256,15 +1322,27 @@ class BakunawaMechDiscordClient(discord.Client):
                 return
             channel = fetched_channel
 
-        existing = await self._collect_lifecycle_status_messages(channel)
+        existing = await self._collect_lifecycle_card_messages(channel)
         for message in existing:
             await _safe_delete_message(message)
 
-        sent = await channel.send(
-            embed=embed_from_payload(lifecycle_status_embed(status.kind.value, status.description)),
+        entries = await self.base_runtime.database.leaderboard(StatsSort.SALES)
+        stats_message = await channel.send(
+            embed=embed_from_payload(lifecycle_stats_embed(entries)),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        self._status_message_ids[channel_id] = sent.id
+        status_message = await channel.send(
+            embed=embed_from_payload(
+                lifecycle_status_embed(
+                    status.kind.value,
+                    status.description,
+                    channel_role=channel_role,
+                )
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self._stats_message_ids[channel_id] = stats_message.id
+        self._status_message_ids[channel_id] = status_message.id
 
     async def _latest_channel_message_id(self, channel_id: int) -> int | None:
         channel = self.get_channel(channel_id)
@@ -1282,7 +1360,7 @@ class BakunawaMechDiscordClient(discord.Client):
             return None
         return messages[0].id if messages else None
 
-    async def _collect_lifecycle_status_messages(
+    async def _collect_lifecycle_card_messages(
         self,
         channel: discord.TextChannel,
     ) -> list[discord.Message]:
@@ -1297,7 +1375,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 break
             if message.author.id != bot_user.id:
                 continue
-            if _is_lifecycle_status_message(message):
+            if _is_lifecycle_card_message(message):
                 matches.append(message)
         return matches
 
@@ -1643,6 +1721,38 @@ class BakunawaMechDiscordClient(discord.Client):
                 embed_from_payload(
                     task_status_embed(
                         "Bakunawa Mech Clean",
+                        _clean_result_description(result),
+                    )
+                )
+            ]
+        )
+        self._track_task(
+            _safe_delete_message_later(
+                progress,
+                self.base_runtime.config.discord.transient_message_timeout_seconds,
+            )
+        )
+
+    async def _run_clean_log_prefix(self, message: discord.Message) -> None:
+        if not self._is_admin_user(message.author.id):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot."))]
+            )
+            return
+        if not self._is_admin_messageable_channel(message.channel):
+            await message.channel.send(
+                embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel."))]
+            )
+            return
+        progress = await message.channel.send(
+            embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Log Clean", "Cleaning top-level clutter in the log channel..."))]
+        )
+        result = await self._clean_receipt_log_parent_channel(preserve_message_ids={progress.id})
+        await progress.edit(
+            embeds=[
+                embed_from_payload(
+                    task_status_embed(
+                        "Bakunawa Mech Log Clean",
                         _clean_result_description(result),
                     )
                 )
@@ -2239,6 +2349,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
             if restored_channel_id is not None:
                 self._schedule_lifecycle_status_refresh(restored_channel_id, delay_seconds=0.25)
+            self._schedule_all_lifecycle_status_refreshes(delay_seconds=0.25)
             return
         if action == "print":
             session = await self.base_runtime.bot_state.current_session(owner_id)
@@ -3659,6 +3770,36 @@ class BakunawaMechDiscordClient(discord.Client):
                 result.failed += 1
         return result
 
+    async def _clean_receipt_log_parent_channel(
+        self,
+        *,
+        preserve_message_ids: set[int] | None = None,
+    ) -> CleanResult:
+        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
+        if log_channel_id is None or log_channel_id <= 0:
+            return CleanResult()
+        channel = self.get_channel(log_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            try:
+                fetched_channel = await self.fetch_channel(log_channel_id)
+            except (discord.Forbidden, discord.HTTPException):
+                return CleanResult(failed=1)
+            if not isinstance(fetched_channel, discord.TextChannel):
+                return CleanResult()
+            channel = fetched_channel
+        return await self._clean_non_log_messages(
+            channel,
+            preserve_message_ids=preserve_message_ids,
+        )
+
+    async def _monitor_log_channel_cleanup(self) -> None:
+        while not self.is_closed():
+            await asyncio.sleep(LOG_CHANNEL_CLEANUP_INTERVAL_SECONDS)
+            try:
+                await self._clean_receipt_log_parent_channel()
+            except Exception as error:  # noqa: BLE001
+                LOGGER.warning("periodic receipt log cleanup failed: %s", error)
+
     async def _set_receipt_note(
         self,
         receipt_id: str,
@@ -4624,38 +4765,110 @@ class BakunawaMechDiscordClient(discord.Client):
                     expired = await self.base_runtime.bot_state.remove_session(session.user_id)
                     if expired is None:
                         continue
-                    if expired.panel_channel_id is not None and expired.panel_message_id is not None:
-                        panel_channel = self.get_channel(expired.panel_channel_id)
-                        if panel_channel is not None:
-                            try:
-                                panel_message = await panel_channel.fetch_message(expired.panel_message_id)
-                            except (discord.HTTPException, discord.NotFound, AttributeError):
-                                panel_message = None
-                            if panel_message is not None:
-                                await _safe_delete_message(panel_message)
-                    self._schedule_lifecycle_status_refresh(expired.channel_id, delay_seconds=0.25)
+                    await self._expire_idle_calculator_session(expired)
+                    self._schedule_all_lifecycle_status_refreshes(delay_seconds=0.25)
                     continue
                 if session.timeout_warning_sent or idle_for + warning_seconds < idle_timeout:
                     continue
-                warned = await self.base_runtime.bot_state.update_session(
+                warned = await self.base_runtime.bot_state.mark_timeout_warning_sent(
                     session.user_id,
-                    lambda current: setattr(current, "timeout_warning_sent", True),
+                    warning_sent=True,
                 )
-                if warned is None or warned.panel_channel_id is None or warned.panel_message_id is None:
+                if warned is None:
                     continue
-                panel_channel = self.get_channel(warned.panel_channel_id)
-                if panel_channel is None:
-                    continue
-                try:
-                    panel_message = await panel_channel.fetch_message(warned.panel_message_id)
-                except (discord.HTTPException, discord.NotFound, AttributeError):
-                    continue
-                warning_payload = ReplyPayload(
-                    embeds=[calc_timeout_warning_embed(self.base_runtime.catalog.items, warned)],
-                    components=calc_timeout_action_rows(warned.user_id),
+                await self._warn_idle_calculator_session(warned)
+
+    async def _warn_idle_calculator_session(self, session: CalculatorSession) -> None:
+        panel_message = await self._panel_message_for_session(session)
+        if panel_message is not None:
+            warning_payload = ReplyPayload(
+                embeds=[calc_timeout_warning_embed(self.base_runtime.catalog.items, session)],
+                components=calc_timeout_action_rows(session.user_id),
+                ephemeral=True,
+            )
+            try:
+                await panel_message.edit(
+                    **reply_payload_to_spec(self, self.shared_runtime, warning_payload).edit_kwargs()
+                )
+            except (discord.HTTPException, discord.NotFound):
+                LOGGER.debug("message_id=%s idle warning panel edit skipped", panel_message.id)
+        channel = await self._resolve_messageable_channel(session.channel_id)
+        if channel is not None:
+            await channel.send(
+                content=(
+                    f"<@{session.user_id}> your calculator is idle. "
+                    f"{_session_idle_prompt(session)} Continue within 10 minutes or it will close automatically."
+                ),
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+
+    async def _expire_idle_calculator_session(self, session: CalculatorSession) -> None:
+        panel_message = await self._panel_message_for_session(session)
+        if panel_message is not None:
+            try:
+                await panel_message.delete()
+            except (discord.HTTPException, discord.NotFound):
+                closed_payload = ReplyPayload(
+                    embeds=[
+                        task_warning_embed(
+                            "Bakunawa Mech Calculator",
+                            (
+                                f"{_session_idle_prompt(session)}\n\n"
+                                "This calculator closed after 20 minutes of inactivity. Run `bm!calc` to start again."
+                            ),
+                        )
+                    ],
+                    components=[],
                     ephemeral=True,
                 )
-                await panel_message.edit(**reply_payload_to_spec(self, self.shared_runtime, warning_payload).edit_kwargs())
+                try:
+                    await panel_message.edit(
+                        **reply_payload_to_spec(self, self.shared_runtime, closed_payload).edit_kwargs()
+                    )
+                except (discord.HTTPException, discord.NotFound):
+                    LOGGER.warning(
+                        "user_id=%s message_id=%s idle calculator panel could not be deleted or closed",
+                        session.user_id,
+                        getattr(panel_message, "id", None),
+                    )
+        channel = await self._resolve_messageable_channel(session.channel_id)
+        if channel is not None:
+            closure = await channel.send(
+                content=f"<@{session.user_id}> calculator closed after 20 minutes of inactivity.",
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+            self._track_task(
+                _safe_delete_message_later(
+                    closure,
+                    self.base_runtime.config.discord.transient_message_timeout_seconds,
+                )
+            )
+
+    async def _panel_message_for_session(self, session: CalculatorSession) -> discord.Message | None:
+        if session.panel_channel_id is None or session.panel_message_id is None:
+            return None
+        panel_channel = await self._resolve_messageable_channel(session.panel_channel_id)
+        if panel_channel is None:
+            return None
+        try:
+            return await panel_channel.fetch_message(session.panel_message_id)
+        except (discord.HTTPException, discord.NotFound, AttributeError):
+            return None
+
+    async def _resolve_messageable_channel(
+        self,
+        channel_id: int,
+    ) -> discord.TextChannel | discord.Thread | None:
+        channel = self.get_channel(channel_id)
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return channel
+        try:
+            fetched_channel = await self.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return None
+        if isinstance(fetched_channel, (discord.TextChannel, discord.Thread)):
+            return fetched_channel
+        return None
 
     async def _monitor_help_panels(self) -> None:
         while not self.is_closed():
@@ -4894,7 +5107,7 @@ class BakunawaMechDiscordClient(discord.Client):
         )
         await self.base_runtime.database.save_receipt_with_accounting(receipt, audit, accounting)
         await self.base_runtime.bot_state.remove_session(session.user_id)
-        self._schedule_lifecycle_status_refresh(session.channel_id, delay_seconds=0.25)
+        self._schedule_all_lifecycle_status_refreshes(delay_seconds=0.25)
         await self._post_receipt_messages(receipt, accounting)
         return receipt_id
 
@@ -5511,6 +5724,35 @@ class BakunawaMechDiscordClient(discord.Client):
             )
 
         @self.tree.command(
+            name="mechcleanlog",
+            description="Clean top-level clutter from the receipt log channel.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        async def mechcleanlog(interaction: discord.Interaction[Any]) -> None:
+            channel = interaction.channel
+            if channel is None:
+                await interaction.response.send_message("This interaction is missing a channel context.", ephemeral=True)
+                return
+            if not self._is_admin_user(interaction.user.id):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "You are not an admin for this bot.")),
+                    ephemeral=True,
+                )
+                return
+            if not self._is_admin_messageable_channel(channel):
+                await interaction.response.send_message(
+                    embed=embed_from_payload(task_error_embed("Bakunawa Mech Access", "This admin command is not enabled in this channel.")),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            result = await self._clean_receipt_log_parent_channel()
+            await interaction.edit_original_response(
+                embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Log Clean", _clean_result_description(result)))],
+            )
+
+        @self.tree.command(
             name="mechnote",
             description="Add, update, or clear a receipt note.",
             **command_kwargs,
@@ -6067,12 +6309,13 @@ class IndividualItemCategory:
 
 INDIVIDUAL_CATEGORY_ORDER = {
     "tuning": 0,
-    "engine_upgrade": 1,
-    "maintenance": 2,
-    "cosmetic": 3,
-    "repair": 4,
-    "takeout": 5,
-    "other": 6,
+    "nitrous": 1,
+    "engine_upgrade": 2,
+    "maintenance": 3,
+    "cosmetic": 4,
+    "repair": 5,
+    "takeout": 6,
+    "other": 7,
 }
 
 
@@ -6123,6 +6366,7 @@ def _catalog_category_key(item: CatalogItem) -> str:
 def _catalog_category_label(category_key: str) -> str:
     labels = {
         "tuning": "Tuning",
+        "nitrous": "Nitrous",
         "engine_upgrade": "Engine Upgrades",
         "maintenance": "Maintenance",
         "cosmetic": "Cosmetics",
@@ -6152,7 +6396,9 @@ def _package_option_description(package_key: str) -> str:
         "full_upgrades": "TIER 3: Full Tuning plus engine included",
         "full_performance_upgrade": "TIER 1: includes 5x Performance Parts",
         "full_cosmetics": "TIER 1: includes vehicle-specific cosmetics as ??x",
-        "repair": "REPAIR: quick 15k repair kit",
+        "nitro_kit_first_time": "NITROUS: first-time install with 3 kits",
+        "full_nitro_refill": "NITROUS: includes 3x Nitrous Bottle",
+        "repair": "REPAIR: quick repair kit",
     }
     return descriptions.get(package_key, "Package")
 
@@ -6349,11 +6595,21 @@ def _is_lifecycle_status_message(message: discord.Message) -> bool:
     return any(embed.title == "Bakunawa Mech Status" for embed in message.embeds)
 
 
+def _is_lifecycle_stats_message(message: discord.Message) -> bool:
+    return any(embed.title == "Bakunawa Mech Live Stats" for embed in message.embeds)
+
+
+def _is_lifecycle_card_message(message: discord.Message) -> bool:
+    return _is_lifecycle_status_message(message) or _is_lifecycle_stats_message(message)
+
+
 def _is_log_related_message(message: discord.Message, bot_user_id: int | None) -> bool:
+    if _is_lifecycle_card_message(message):
+        return True
+    if getattr(message, "thread", None) is not None:
+        return True
     if bot_user_id is not None and message.author.id != bot_user_id:
         return False
-    if _is_lifecycle_status_message(message):
-        return True
     content = message.content or ""
     if content.startswith("Receipt `") and " saved for " in content:
         return True
@@ -6383,6 +6639,18 @@ def _proof_preview_repair_result_description(result: ProofPreviewRepairResult) -
         f"Refresh failures: {result.refresh_failures}\n"
         f"Channel scan failures: {result.channel_failures}"
     )
+
+
+def _session_idle_prompt(session: CalculatorSession) -> str:
+    if session.awaiting_proof:
+        return "This receipt is waiting for proof upload."
+    if session.proof_processing:
+        return "This receipt is finishing proof processing."
+    if session.rescan_active:
+        return "This receipt is reviewing a rescan candidate."
+    if not session.items:
+        return "This receipt is still waiting for package or item selection."
+    return "This receipt is waiting for final review or Print Receipt."
 
 
 def _has_existing_local_proof_path(proof_path: str | None) -> bool:

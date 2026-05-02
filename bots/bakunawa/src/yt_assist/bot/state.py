@@ -120,6 +120,19 @@ class BotState:
             session.timeout_warning_sent = False
             return _clone_session(session)
 
+    async def mark_timeout_warning_sent(
+        self,
+        user_id: int,
+        *,
+        warning_sent: bool,
+    ) -> CalculatorSession | None:
+        async with self._lock:
+            session = self._sessions.get(user_id)
+            if session is None:
+                return None
+            session.timeout_warning_sent = warning_sent
+            return _clone_session(session)
+
     async def set_panel_message(
         self,
         user_id: int,

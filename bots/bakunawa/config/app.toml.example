@@ -1,24 +1,24 @@
 [discord]
 token = "PUT_YOUR_BOT_TOKEN_HERE"
 # Optional: set this if you want instant slash-command registration in a test guild.
-test_guild_id = 1158757318792589423
+test_guild_id = 0
 prefix = "bm!"
-message_content_intent = true
+message_content_intent = false
 # The bot needs Manage Channels in the configured main/admin status channels so it can refresh the
 # channel-topic heartbeat and keep the status panel current.
 admin_user_ids = [1]
 admin_channel_ids = [1494151064948048003]
 allowed_channel_ids = [1494151046199509103]
 receipt_log_channel_id = 1494151113878929479
-status_text = "helping Bakunawa Mech log upgrades"
+status_text = "calculating for Bakunawa Mech <3"
 stats_delete_after_seconds = 60
 pending_upload_timeout_seconds = 180
 # Optional: auto-delete short-lived public replies like stats/help after this many seconds.
 transient_message_timeout_seconds = 120
 # Optional: pending calculator sessions idle out after this many seconds.
-receipt_idle_timeout_seconds = 300
+receipt_idle_timeout_seconds = 1200
 # Optional: warn the creator this many seconds before an idle receipt expires.
-receipt_idle_warning_seconds = 60
+receipt_idle_warning_seconds = 600
 log_seen_messages = false
 
 [storage]

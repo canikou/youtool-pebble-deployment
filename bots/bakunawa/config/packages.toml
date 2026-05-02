@@ -139,3 +139,21 @@ base_materials = [
 [packages.repair]
 label = "[REPAIR] Repair Kit"
 price_item = "REPAIR KIT"
+
+[packages.nitro_kit_first_time]
+label = "[NITROUS] 3x Nitro Kit (First Time)"
+price_item = "3X NITRO KIT (FIRST TIME)"
+base_materials = [
+  "NITROUS INSTALL KIT",
+  "NITROUS INSTALL KIT",
+  "NITROUS INSTALL KIT",
+]
+
+[packages.full_nitro_refill]
+label = "[NITROUS] Full Nitro Refill"
+price_item = "FULL NITRO REFILL"
+base_materials = [
+  "NITROUS BOTTLE",
+  "NITROUS BOTTLE",
+  "NITROUS BOTTLE",
+]

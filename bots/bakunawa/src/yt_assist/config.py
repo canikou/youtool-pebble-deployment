@@ -27,8 +27,8 @@ class DiscordConfig(BaseModel):
     stats_delete_after_seconds: int
     pending_upload_timeout_seconds: int
     transient_message_timeout_seconds: int = 120
-    receipt_idle_timeout_seconds: int = 300
-    receipt_idle_warning_seconds: int = 60
+    receipt_idle_timeout_seconds: int = 1200
+    receipt_idle_warning_seconds: int = 600
     log_seen_messages: bool
 
     @field_validator("test_guild_id", mode="before")

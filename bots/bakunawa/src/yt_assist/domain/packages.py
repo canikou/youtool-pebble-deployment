@@ -84,7 +84,9 @@ class PackageCatalog:
             "full_tuning": 2,
             "full_upgrades": 3,
             "full_maintenance": 4,
-            "repair": 5,
+            "nitro_kit_first_time": 5,
+            "full_nitro_refill": 6,
+            "repair": 7,
         }
         return sorted(
             self.packages.values(),

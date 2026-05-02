@@ -260,11 +260,19 @@ category = "ENGINE UPGRADE"
 active = true
 
 [[items]]
-name = "NITROUS"
-unit_price = 0
-unit_cost = 0
-category = ""
-price_pending = true
+name = "NITROUS INSTALL KIT"
+aliases = ["nitrous kit", "nitro kit", "nitrous install", "nitrous install kit"]
+unit_price = 150000
+unit_cost = 5000
+category = "NITROUS"
+active = true
+
+[[items]]
+name = "NITROUS BOTTLE"
+aliases = ["nitrous refill", "nitro refill", "nitrous bottle", "nitro bottle"]
+unit_price = 100000
+unit_cost = 50000
+category = "NITROUS"
 active = true
 
 [[items]]
@@ -329,5 +337,21 @@ name = "FULL COSMETIC"
 aliases = ["full cosmetics"]
 unit_price = 10000
 unit_cost = 0
+category = "PACKAGE"
+active = true
+
+[[items]]
+name = "3X NITRO KIT (FIRST TIME)"
+aliases = ["3x nitro kit", "3x nitrous kit", "first time nitro kit", "nitro kit first time"]
+unit_price = 350000
+unit_cost = 15000
+category = "PACKAGE"
+active = true
+
+[[items]]
+name = "FULL NITRO REFILL"
+aliases = ["nitro refill", "full nitrous refill"]
+unit_price = 300000
+unit_cost = 150000
 category = "PACKAGE"
 active = true
