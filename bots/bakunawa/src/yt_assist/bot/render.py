@@ -240,7 +240,7 @@ def lifecycle_status_embed(state: str, description: str, *, channel_role: str = 
             "`bm!stats` - view all employee stats\n"
             "`bm!fixpreviews` - repair proof previews\n"
             "`bm!rebuildlogs` - rebuild log threads\n"
-            "`bm!cleanlog` - clean log-channel clutter"
+            "`bm!cleanlog` - clean main-channel clutter"
         )
     else:
         field_name = "Common Commands"
@@ -431,7 +431,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}import [file] [mode]` / `/mechimport` - Import a reviewed export\n"
                 f"`{prefix}rebuildlogs` / `/mechrebuildlogs` - Rebuild the receipt log channel from the database\n"
                 f"`{prefix}fixpreviews` / `/mechfixpreviews` - Refresh old proof previews from saved files\n"
-                f"`{prefix}cleanlog` / `/mechcleanlog` - Clean top-level clutter from the log channel\n"
+                f"`{prefix}cleanlog` / `/mechcleanlog` - Clean top-level clutter from the main channel\n"
                 f"`{prefix}clean` / `/mechclean` - Delete non-log messages from the current channel or thread\n"
                 f"`{prefix}restartbot` / `/mechrestartbot` - Restart the bot remotely\n"
                 f"`{prefix}stop` / `/mechstop` - Shut the bot down gracefully"

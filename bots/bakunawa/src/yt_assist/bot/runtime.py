@@ -1051,7 +1051,7 @@ class BakunawaMechDiscordClient(discord.Client):
             kind=LifecycleStatusKind.ONLINE,
             description=(
                 "Receipt logs are online and grouped into employee threads.\n\n"
-                f"{prefix}cleanlog keeps the parent log channel tidy."
+                f"{prefix}cleanlog keeps the main calculator channel tidy."
             ),
         )
         self._main_status = LifecycleStatusState(
@@ -1326,11 +1326,13 @@ class BakunawaMechDiscordClient(discord.Client):
         for message in existing:
             await _safe_delete_message(message)
 
-        entries = await self.base_runtime.database.leaderboard(StatsSort.SALES)
-        stats_message = await channel.send(
-            embed=embed_from_payload(lifecycle_stats_embed(entries)),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        stats_message: discord.Message | None = None
+        if channel_role == "log":
+            entries = await self.base_runtime.database.leaderboard(StatsSort.SALES)
+            stats_message = await channel.send(
+                embed=embed_from_payload(lifecycle_stats_embed(entries)),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         status_message = await channel.send(
             embed=embed_from_payload(
                 lifecycle_status_embed(
@@ -1341,7 +1343,10 @@ class BakunawaMechDiscordClient(discord.Client):
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        self._stats_message_ids[channel_id] = stats_message.id
+        if stats_message is not None:
+            self._stats_message_ids[channel_id] = stats_message.id
+        else:
+            self._stats_message_ids.pop(channel_id, None)
         self._status_message_ids[channel_id] = status_message.id
 
     async def _latest_channel_message_id(self, channel_id: int) -> int | None:
@@ -1745,14 +1750,14 @@ class BakunawaMechDiscordClient(discord.Client):
             )
             return
         progress = await message.channel.send(
-            embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Log Clean", "Cleaning top-level clutter in the log channel..."))]
+            embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Main Clean", "Cleaning top-level clutter in the main channel..."))]
         )
-        result = await self._clean_receipt_log_parent_channel(preserve_message_ids={progress.id})
+        result = await self._clean_main_chat_channel(preserve_message_ids={progress.id})
         await progress.edit(
             embeds=[
                 embed_from_payload(
                     task_status_embed(
-                        "Bakunawa Mech Log Clean",
+                        "Bakunawa Mech Main Clean",
                         _clean_result_description(result),
                     )
                 )
@@ -3770,18 +3775,18 @@ class BakunawaMechDiscordClient(discord.Client):
                 result.failed += 1
         return result
 
-    async def _clean_receipt_log_parent_channel(
+    async def _clean_main_chat_channel(
         self,
         *,
         preserve_message_ids: set[int] | None = None,
     ) -> CleanResult:
-        log_channel_id = self.base_runtime.config.discord.receipt_log_channel_id
-        if log_channel_id is None or log_channel_id <= 0:
+        main_channel_id = self._configured_main_channel_id()
+        if main_channel_id is None or main_channel_id <= 0:
             return CleanResult()
-        channel = self.get_channel(log_channel_id)
+        channel = self.get_channel(main_channel_id)
         if not isinstance(channel, discord.TextChannel):
             try:
-                fetched_channel = await self.fetch_channel(log_channel_id)
+                fetched_channel = await self.fetch_channel(main_channel_id)
             except (discord.Forbidden, discord.HTTPException):
                 return CleanResult(failed=1)
             if not isinstance(fetched_channel, discord.TextChannel):
@@ -3796,9 +3801,9 @@ class BakunawaMechDiscordClient(discord.Client):
         while not self.is_closed():
             await asyncio.sleep(LOG_CHANNEL_CLEANUP_INTERVAL_SECONDS)
             try:
-                await self._clean_receipt_log_parent_channel()
+                await self._clean_main_chat_channel()
             except Exception as error:  # noqa: BLE001
-                LOGGER.warning("periodic receipt log cleanup failed: %s", error)
+                LOGGER.warning("periodic main-channel cleanup failed: %s", error)
 
     async def _set_receipt_note(
         self,
@@ -5725,7 +5730,7 @@ class BakunawaMechDiscordClient(discord.Client):
 
         @self.tree.command(
             name="mechcleanlog",
-            description="Clean top-level clutter from the receipt log channel.",
+            description="Clean top-level clutter from the main calculator channel.",
             **command_kwargs,
         )
         @app_commands.guild_only()
@@ -5747,9 +5752,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
-            result = await self._clean_receipt_log_parent_channel()
+            result = await self._clean_main_chat_channel()
             await interaction.edit_original_response(
-                embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Log Clean", _clean_result_description(result)))],
+                embeds=[embed_from_payload(task_status_embed("Bakunawa Mech Main Clean", _clean_result_description(result)))],
             )
 
         @self.tree.command(
