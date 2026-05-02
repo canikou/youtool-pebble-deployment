@@ -314,6 +314,24 @@ class PayoutEntry:
 
 
 @dataclass(slots=True)
+class WeeklyPayoutSnapshot:
+    id: int
+    week_key: str
+    week_start_at: datetime
+    week_end_at: datetime
+    ranking_basis: str
+    top_mech_user_id: str | None
+    runner_up_user_id: str | None
+    total_sales: int
+    total_profit: int
+    receipt_count: int
+    actor_user_id: str
+    actor_display_name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
 class AuditEvent:
     id: int
     actor_user_id: str

@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone
 from typing import Any
 
 from yt_assist.domain.backup import save_export_async
 from yt_assist.domain.catalog import Catalog
 from yt_assist.domain.contracts import Contracts
-from yt_assist.domain.models import StatsSort
+from yt_assist.domain.models import LeaderboardEntry, StatsSort, utcnow
 from yt_assist.domain.packages import PackageCatalog
 from yt_assist.domain.templates import (
     TemplateLoadStatus,
@@ -36,6 +37,9 @@ from .render import (
 LOGGER = logging.getLogger(__name__)
 TEMPLATES_CHANNEL_ID = 1494151323526889633
 HANDLED_USER_ERROR = "__handled_user_error__"
+UTC_PLUS_8 = timezone(timedelta(hours=8))
+WEEKLY_TOP_MECH_BONUS_CENTS = 100_000_000
+WEEKLY_RUNNER_UP_BONUS_CENTS = 50_000_000
 
 
 @dataclass(slots=True)
@@ -118,6 +122,7 @@ PREFIX_COMMAND_ALIASES: dict[str, str] = {
     "payouts": "payouts",
     "payoutoffset": "payoutoffset",
     "payoutsplit": "payoutsplit",
+    "weeklypayout": "weeklypayout",
     "refresh": "refresh",
     "templates": "templates",
     "export": "export",
@@ -131,6 +136,7 @@ SLASH_COMMAND_ALIASES: dict[str, str] = {
     "mechpayouts": "payouts",
     "mechpayoutoffset": "payoutoffset",
     "mechpayoutsplit": "payoutsplit",
+    "mechweeklypayout": "weeklypayout",
     "mechrefresh": "refresh",
     "mechtemplates": "templates",
     "mechexport": "export",
@@ -462,6 +468,130 @@ async def _handle_payoutsplit(ctx: CommandContext, args: list[str]) -> CommandRe
         )
     )
     return CommandResult(canonical_name="payoutsplit", events=events)
+
+
+async def _handle_weeklypayout(ctx: CommandContext, args: list[str]) -> CommandResult:
+    del args
+    await _ensure_admin(ctx)
+    await _ensure_admin_channel(ctx)
+
+    week_key, week_start_at, week_end_at = _current_weekly_payout_window()
+    snapshot = await ctx.runtime.database.get_weekly_snapshot(week_key)
+    created = snapshot is None
+    if snapshot is None:
+        receipts = await ctx.runtime.database.list_weekly_eligible_receipts()
+    else:
+        receipts = await ctx.runtime.database.list_weekly_snapshot_receipts(snapshot.id)
+
+    if not receipts:
+        events = _cleanup_prefix_invocation_events(ctx)
+        events.append(
+            _send(
+                ReplyPayload(
+                    embeds=[
+                        task_status_embed(
+                            "Bakunawa Mech Weekly Payout",
+                            (
+                                f"Week `{week_key}` has no eligible active receipts to snapshot.\n"
+                                "Nothing was frozen and no bonuses were applied."
+                            ),
+                        )
+                    ],
+                    ephemeral=ctx.is_interaction,
+                )
+            )
+        )
+        return CommandResult(canonical_name="weeklypayout", events=events)
+
+    entries = await ctx.runtime.database.weekly_leaderboard(receipts=receipts)
+    top_entry = entries[0] if entries else None
+    runner_up_entry = entries[1] if len(entries) > 1 else None
+
+    if snapshot is None:
+        snapshot = await ctx.runtime.database.create_weekly_snapshot(
+            week_key=week_key,
+            week_start_at=week_start_at,
+            week_end_at=week_end_at,
+            ranking_basis="sales",
+            receipts=receipts,
+            top_mech_user_id=top_entry.user_id if top_entry is not None else None,
+            runner_up_user_id=runner_up_entry.user_id if runner_up_entry is not None else None,
+            actor_user_id=str(ctx.actor.user_id),
+            actor_display_name=ctx.actor.display_name,
+        )
+    else:
+        try:
+            await ctx.runtime.database.clear_weekly_bonus_adjustments(snapshot.id)
+        except ValueError as error:
+            raise _handled(
+                CommandResult(
+                    canonical_name="weeklypayout",
+                    events=[
+                        _send(
+                            _error_reply(
+                                ctx,
+                                "Bakunawa Mech Weekly Payout",
+                                str(error),
+                            )
+                        )
+                    ],
+                )
+            ) from error
+        snapshot = await ctx.runtime.database.replace_weekly_snapshot(
+            snapshot_id=snapshot.id,
+            week_key=week_key,
+            top_mech_user_id=top_entry.user_id if top_entry is not None else None,
+            runner_up_user_id=runner_up_entry.user_id if runner_up_entry is not None else None,
+            actor_user_id=str(ctx.actor.user_id),
+            actor_display_name=ctx.actor.display_name,
+        )
+
+    winners: list[tuple[str, str, int, str]] = []
+    if top_entry is not None:
+        winners.append(
+            (
+                top_entry.user_id,
+                top_entry.display_name,
+                WEEKLY_TOP_MECH_BONUS_CENTS,
+                f"Top Mech bonus for {week_key}",
+            )
+        )
+    if runner_up_entry is not None:
+        winners.append(
+            (
+                runner_up_entry.user_id,
+                runner_up_entry.display_name,
+                WEEKLY_RUNNER_UP_BONUS_CENTS,
+                f"Runner Up bonus for {week_key}",
+            )
+        )
+
+    inserted = await ctx.runtime.database.create_weekly_bonus_adjustments(
+        snapshot.id,
+        winners,
+        str(ctx.actor.user_id),
+        ctx.actor.display_name,
+    )
+
+    description = (
+        f"Week `{week_key}` {'created' if created else 'replaced'}.\n"
+        f"Window: {week_start_at.astimezone(UTC_PLUS_8):%Y-%m-%d %H:%M} to {week_end_at.astimezone(UTC_PLUS_8):%Y-%m-%d %H:%M} UTC+8\n"
+        f"Frozen receipts: {len(receipts)}\n"
+        f"Top Mech: {_weekly_winner_line(top_entry, WEEKLY_TOP_MECH_BONUS_CENTS)}\n"
+        f"Runner Up: {_weekly_winner_line(runner_up_entry, WEEKLY_RUNNER_UP_BONUS_CENTS)}\n"
+        f"Bonus adjustments created: {inserted}\n"
+        "New receipts created after this snapshot now count toward the next payout cycle."
+    )
+    events = _cleanup_prefix_invocation_events(ctx)
+    events.append(
+        _send(
+            ReplyPayload(
+                embeds=[task_status_embed("Bakunawa Mech Weekly Payout", description)],
+                ephemeral=ctx.is_interaction,
+            )
+        )
+    )
+    return CommandResult(canonical_name="weeklypayout", events=events)
 
 
 async def _handle_refresh(ctx: CommandContext, args: list[str]) -> CommandResult:
@@ -801,6 +931,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "payouts": _handle_payouts,
     "payoutoffset": _handle_payoutoffset,
     "payoutsplit": _handle_payoutsplit,
+    "weeklypayout": _handle_weeklypayout,
     "refresh": _handle_refresh,
     "templates": _handle_templates,
     "export": _handle_export,
@@ -862,6 +993,31 @@ def _format_signed_amount_cents(amount_cents: int) -> str:
         return "$0"
     sign = "+" if amount_cents > 0 else "-"
     return f"{sign}${_format_amount_cents(amount_cents)}"
+
+
+def _current_weekly_payout_window():
+    local_now = utcnow().astimezone(UTC_PLUS_8)
+    iso_year, iso_week, iso_weekday = local_now.isocalendar()
+    week_start = (local_now - timedelta(days=iso_weekday - 1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    week_end = week_start + timedelta(days=7)
+    week_key = f"{iso_year}-W{iso_week:02d}"
+    return week_key, week_start.astimezone(timezone.utc), week_end.astimezone(timezone.utc)
+
+
+def _weekly_winner_line(entry: LeaderboardEntry | None, bonus_cents: int) -> str:
+    if entry is None:
+        return "n/a"
+    profit = entry.total_sales - entry.procurement_cost
+    return (
+        f"<@{entry.user_id}> | Sales ${_format_amount_cents(entry.total_sales)} | "
+        f"Profit ${_format_amount_cents(profit)} | Receipts {entry.receipt_count} | "
+        f"Bonus ${_format_amount_cents(bonus_cents)}"
+    )
 
 
 def _levenshtein(left: str, right: str) -> int:

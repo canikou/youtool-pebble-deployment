@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .models import ExportBundle
 
-EXPORT_SCHEMA_VERSION = 3
+EXPORT_SCHEMA_VERSION = 5
 
 
 def _timestamp() -> datetime:

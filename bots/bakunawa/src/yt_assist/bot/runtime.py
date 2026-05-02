@@ -1021,6 +1021,8 @@ class BakunawaMechDiscordClient(discord.Client):
             invocation_message=message,
         )
         await self.apply_result(dispatch, result)
+        if result.canonical_name in {"payoutoffset", "payoutsplit", "weeklypayout"}:
+            self._schedule_all_lifecycle_status_refreshes(delay_seconds=0.25)
 
     async def _announce_starting_up(self) -> None:
         if self._ready_announced:
@@ -5594,6 +5596,18 @@ class BakunawaMechDiscordClient(discord.Client):
             )
 
         @self.tree.command(
+            name="mechweeklypayout",
+            description="Freeze this week's payout cycle and award Top Mech bonuses.",
+            **command_kwargs,
+        )
+        @app_commands.guild_only()
+        async def mechweeklypayout(interaction: discord.Interaction[Any]) -> None:
+            await self._run_slash_command(
+                interaction,
+                _build_slash_input("mechweeklypayout"),
+            )
+
+        @self.tree.command(
             name="mechrefresh",
             description="Reload catalog and contract files from disk.",
             **command_kwargs,
@@ -5992,6 +6006,8 @@ class BakunawaMechDiscordClient(discord.Client):
             interaction=interaction,
         )
         await self.apply_result(dispatch, result)
+        if result.canonical_name in {"payoutoffset", "payoutsplit", "weeklypayout"}:
+            self._schedule_all_lifecycle_status_refreshes(delay_seconds=0.25)
 
 
 class ReceiptNoteModal(discord.ui.Modal, title="Receipt Note"):

@@ -28,6 +28,7 @@ from yt_assist.domain.models import (
     ReceiptStatus,
     ReceiptSummary,
     StatsSort,
+    WeeklyPayoutSnapshot,
     utcnow,
 )
 from yt_assist.domain.proof import (
@@ -39,7 +40,7 @@ from yt_assist.domain.serialization import parse_datetime
 from yt_assist.storage.migrations import run_migrations
 
 LOGGER = logging.getLogger(__name__)
-EXPORT_SCHEMA_VERSION = 4
+EXPORT_SCHEMA_VERSION = 5
 PROCUREMENT_CUTOVER_ROW_ID = 1
 
 
@@ -358,6 +359,371 @@ class Database:
             )
         )
         return entries
+
+    async def get_weekly_snapshot(self, week_key: str) -> WeeklyPayoutSnapshot | None:
+        async with self._connection.execute(
+            """
+            SELECT
+                id,
+                week_key,
+                week_start_at,
+                week_end_at,
+                ranking_basis,
+                top_mech_user_id,
+                runner_up_user_id,
+                total_sales,
+                total_profit,
+                receipt_count,
+                actor_user_id,
+                actor_display_name,
+                created_at,
+                updated_at
+            FROM weekly_payout_snapshots
+            WHERE week_key = ?
+            """,
+            (week_key,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return self._parse_weekly_snapshot(row) if row is not None else None
+
+    async def list_weekly_eligible_receipts(self) -> list[PersistedReceipt]:
+        async with self._connection.execute(
+            """
+            SELECT r.id
+            FROM receipts r
+            WHERE r.status = 'active'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM weekly_payout_snapshot_receipts weekly_receipts
+                    WHERE weekly_receipts.receipt_id = r.id
+              )
+            ORDER BY r.finalized_at ASC, r.id ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+        receipts: list[PersistedReceipt] = []
+        for row in rows:
+            receipt = await self.get_receipt(str(row["id"]))
+            if receipt is not None:
+                receipts.append(receipt)
+        return receipts
+
+    async def list_weekly_snapshot_receipts(self, snapshot_id: int) -> list[PersistedReceipt]:
+        async with self._connection.execute(
+            """
+            SELECT r.id
+            FROM weekly_payout_snapshot_receipts weekly_receipts
+            JOIN receipts r ON r.id = weekly_receipts.receipt_id
+            WHERE weekly_receipts.snapshot_id = ?
+            ORDER BY r.finalized_at ASC, r.id ASC
+            """,
+            (snapshot_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        receipts: list[PersistedReceipt] = []
+        for row in rows:
+            receipt = await self.get_receipt(str(row["id"]))
+            if receipt is not None:
+                receipts.append(receipt)
+        return receipts
+
+    async def weekly_leaderboard(
+        self,
+        *,
+        snapshot_id: int | None = None,
+        receipts: list[PersistedReceipt] | None = None,
+    ) -> list[LeaderboardEntry]:
+        if snapshot_id is not None:
+            receipts = await self.list_weekly_snapshot_receipts(snapshot_id)
+        if receipts is None:
+            raise ValueError("Provide either snapshot_id or receipts.")
+        buckets: dict[str, LeaderboardEntry] = {}
+        for receipt in receipts:
+            current = buckets.get(receipt.creator_user_id)
+            if current is None:
+                current = LeaderboardEntry(
+                    user_id=receipt.creator_user_id,
+                    display_name=receipt.creator_display_name,
+                    total_sales=0,
+                    procurement_cost=0,
+                    receipt_count=0,
+                )
+                buckets[receipt.creator_user_id] = current
+            current.total_sales += receipt.total_sale
+            current.procurement_cost += receipt.procurement_cost
+            current.receipt_count += 1
+        entries = list(buckets.values())
+        entries.sort(
+            key=lambda entry: (
+                -entry.total_sales,
+                -(entry.total_sales - entry.procurement_cost),
+                -entry.receipt_count,
+                entry.user_id,
+            )
+        )
+        return entries
+
+    async def create_weekly_snapshot(
+        self,
+        *,
+        week_key: str,
+        week_start_at,
+        week_end_at,
+        ranking_basis: str,
+        receipts: list[PersistedReceipt],
+        top_mech_user_id: str | None,
+        runner_up_user_id: str | None,
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> WeeklyPayoutSnapshot:
+        created_at = utcnow()
+        total_sales = sum(receipt.total_sale for receipt in receipts)
+        total_profit = sum(receipt.profit for receipt in receipts)
+        await self._connection.execute("BEGIN")
+        try:
+            cursor = await self._connection.execute(
+                """
+                INSERT INTO weekly_payout_snapshots (
+                    week_key,
+                    week_start_at,
+                    week_end_at,
+                    ranking_basis,
+                    top_mech_user_id,
+                    runner_up_user_id,
+                    total_sales,
+                    total_profit,
+                    receipt_count,
+                    actor_user_id,
+                    actor_display_name,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    week_key,
+                    week_start_at.isoformat(),
+                    week_end_at.isoformat(),
+                    ranking_basis,
+                    top_mech_user_id,
+                    runner_up_user_id,
+                    total_sales,
+                    total_profit,
+                    len(receipts),
+                    actor_user_id,
+                    actor_display_name,
+                    created_at.isoformat(),
+                    created_at.isoformat(),
+                ),
+            )
+            snapshot_id = int(cursor.lastrowid)
+            for receipt in receipts:
+                await self._connection.execute(
+                    """
+                    INSERT INTO weekly_payout_snapshot_receipts (
+                        snapshot_id,
+                        receipt_id
+                    ) VALUES (?, ?)
+                    """,
+                    (snapshot_id, receipt.id),
+                )
+            await self._insert_audit_event(
+                AuditEventInput(
+                    actor_user_id=actor_user_id,
+                    actor_display_name=actor_display_name,
+                    action="weekly_payout_snapshot_created",
+                    target_receipt_id=None,
+                    detail_json={
+                        "snapshot_id": snapshot_id,
+                        "week_key": week_key,
+                        "receipt_count": len(receipts),
+                        "top_mech_user_id": top_mech_user_id,
+                        "runner_up_user_id": runner_up_user_id,
+                    },
+                )
+            )
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+        snapshot = await self.get_weekly_snapshot(week_key)
+        if snapshot is None:
+            raise RuntimeError(f"Weekly snapshot {week_key} was not created.")
+        return snapshot
+
+    async def replace_weekly_snapshot(
+        self,
+        *,
+        snapshot_id: int,
+        week_key: str,
+        top_mech_user_id: str | None,
+        runner_up_user_id: str | None,
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> WeeklyPayoutSnapshot:
+        receipts = await self.list_weekly_snapshot_receipts(snapshot_id)
+        updated_at = utcnow()
+        total_sales = sum(receipt.total_sale for receipt in receipts)
+        total_profit = sum(receipt.profit for receipt in receipts)
+        await self._connection.execute("BEGIN")
+        try:
+            await self._connection.execute(
+                """
+                UPDATE weekly_payout_snapshots
+                SET
+                    top_mech_user_id = ?,
+                    runner_up_user_id = ?,
+                    total_sales = ?,
+                    total_profit = ?,
+                    receipt_count = ?,
+                    actor_user_id = ?,
+                    actor_display_name = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    top_mech_user_id,
+                    runner_up_user_id,
+                    total_sales,
+                    total_profit,
+                    len(receipts),
+                    actor_user_id,
+                    actor_display_name,
+                    updated_at.isoformat(),
+                    snapshot_id,
+                ),
+            )
+            await self._insert_audit_event(
+                AuditEventInput(
+                    actor_user_id=actor_user_id,
+                    actor_display_name=actor_display_name,
+                    action="weekly_payout_snapshot_replaced",
+                    target_receipt_id=None,
+                    detail_json={
+                        "snapshot_id": snapshot_id,
+                        "week_key": week_key,
+                        "receipt_count": len(receipts),
+                        "top_mech_user_id": top_mech_user_id,
+                        "runner_up_user_id": runner_up_user_id,
+                    },
+                )
+            )
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+        snapshot = await self.get_weekly_snapshot(week_key)
+        if snapshot is None:
+            raise RuntimeError(f"Weekly snapshot {week_key} disappeared during replacement.")
+        return snapshot
+
+    async def clear_weekly_bonus_adjustments(self, snapshot_id: int) -> int:
+        async with self._connection.execute(
+            """
+            SELECT COUNT(*) AS settled_count
+            FROM payout_adjustments adjustments
+            JOIN weekly_payout_snapshot_adjustments links
+              ON links.payout_adjustment_id = adjustments.id
+            WHERE links.snapshot_id = ?
+              AND settled_at IS NOT NULL
+            """,
+            (snapshot_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        settled_count = int(row["settled_count"]) if row is not None else 0
+        if settled_count:
+            raise ValueError("Weekly payout bonuses are already settled for this snapshot.")
+        cursor = await self._connection.execute(
+            """
+            DELETE FROM payout_adjustments
+            WHERE id IN (
+                SELECT payout_adjustment_id
+                FROM weekly_payout_snapshot_adjustments
+                WHERE snapshot_id = ?
+            )
+            """,
+            (snapshot_id,),
+        )
+        await self._connection.commit()
+        return int(cursor.rowcount or 0)
+
+    async def create_weekly_bonus_adjustments(
+        self,
+        snapshot_id: int,
+        winners: list[tuple[str, str, int, str]],
+        actor_user_id: str,
+        actor_display_name: str,
+    ) -> int:
+        if not winners:
+            return 0
+        created_at = utcnow()
+        inserted = 0
+        await self._connection.execute("BEGIN")
+        try:
+            for user_id, display_name, amount_cents, reason in winners:
+                cursor = await self._connection.execute(
+                    """
+                    INSERT INTO payout_adjustments (
+                        user_id,
+                        display_name,
+                        amount_cents,
+                        reason,
+                        source_user_id,
+                        source_display_name,
+                        actor_user_id,
+                        actor_display_name,
+                        created_at,
+                        settled_at,
+                        settled_by_user_id,
+                        settled_by_display_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        user_id,
+                        display_name,
+                        amount_cents,
+                        reason,
+                        None,
+                        None,
+                        actor_user_id,
+                        actor_display_name,
+                        created_at.isoformat(),
+                    ),
+                )
+                inserted_id = int(cursor.lastrowid)
+                await self._connection.execute(
+                    """
+                    INSERT INTO weekly_payout_snapshot_adjustments (
+                        snapshot_id,
+                        payout_adjustment_id
+                    ) VALUES (?, ?)
+                    """,
+                    (snapshot_id, inserted_id),
+                )
+                await self._insert_audit_event(
+                    AuditEventInput(
+                        actor_user_id=actor_user_id,
+                        actor_display_name=actor_display_name,
+                        action="payout_adjustment_created",
+                        target_receipt_id=None,
+                        detail_json={
+                            "adjustment_id": inserted_id,
+                            "user_id": user_id,
+                            "display_name": display_name,
+                            "amount_cents": amount_cents,
+                            "reason": reason,
+                            "weekly_snapshot_id": snapshot_id,
+                            "source_user_id": None,
+                            "source_display_name": None,
+                            "created_at": created_at.isoformat(),
+                        },
+                    )
+                )
+                inserted += 1
+            await self._connection.commit()
+        except Exception:
+            await self._connection.rollback()
+            raise
+        return inserted
 
     async def list_open_payout_adjustment_user_ids(self) -> list[str]:
         async with self._connection.execute(
@@ -1040,20 +1406,102 @@ class Database:
             """
             SELECT
                 id,
-                user_id,
-                display_name,
-                amount_cents,
-                reason,
-                source_user_id,
-                source_display_name,
+                week_key,
+                week_start_at,
+                week_end_at,
+                ranking_basis,
+                top_mech_user_id,
+                runner_up_user_id,
+                total_sales,
+                total_profit,
+                receipt_count,
                 actor_user_id,
                 actor_display_name,
                 created_at,
-                settled_at,
-                settled_by_user_id,
-                settled_by_display_name
-            FROM payout_adjustments
+                updated_at
+            FROM weekly_payout_snapshots
             ORDER BY created_at ASC, id ASC
+            """
+        ) as cursor:
+            weekly_snapshot_rows = await cursor.fetchall()
+        for row in weekly_snapshot_rows:
+            created_at = parse_datetime(str(row["created_at"]))
+            synthetic_audit_events.append(
+                AuditEvent(
+                    id=synthetic_id,
+                    actor_user_id=str(row["actor_user_id"]),
+                    actor_display_name=str(row["actor_display_name"]),
+                    action="weekly_payout_snapshot",
+                    target_receipt_id=None,
+                    detail_json={
+                        "snapshot_id": int(row["id"]),
+                        "week_key": str(row["week_key"]),
+                        "week_start_at": str(row["week_start_at"]),
+                        "week_end_at": str(row["week_end_at"]),
+                        "ranking_basis": str(row["ranking_basis"]),
+                        "top_mech_user_id": row["top_mech_user_id"],
+                        "runner_up_user_id": row["runner_up_user_id"],
+                        "total_sales": int(row["total_sales"]),
+                        "total_profit": int(row["total_profit"]),
+                        "receipt_count": int(row["receipt_count"]),
+                        "actor_user_id": str(row["actor_user_id"]),
+                        "actor_display_name": str(row["actor_display_name"]),
+                        "created_at": str(row["created_at"]),
+                        "updated_at": str(row["updated_at"]),
+                    },
+                    created_at=created_at,
+                )
+            )
+            synthetic_id -= 1
+
+        async with self._connection.execute(
+            """
+            SELECT
+                snapshot_id,
+                receipt_id
+            FROM weekly_payout_snapshot_receipts
+            ORDER BY snapshot_id ASC, receipt_id ASC
+            """
+        ) as cursor:
+            weekly_snapshot_receipt_rows = await cursor.fetchall()
+        for row in weekly_snapshot_receipt_rows:
+            synthetic_audit_events.append(
+                AuditEvent(
+                    id=synthetic_id,
+                    actor_user_id="",
+                    actor_display_name="",
+                    action="weekly_payout_snapshot_receipt",
+                    target_receipt_id=str(row["receipt_id"]),
+                    detail_json={
+                        "snapshot_id": int(row["snapshot_id"]),
+                        "receipt_id": str(row["receipt_id"]),
+                    },
+                    created_at=utcnow(),
+                )
+            )
+            synthetic_id -= 1
+
+        async with self._connection.execute(
+            """
+            SELECT
+                adjustments.id,
+                adjustments.user_id,
+                adjustments.display_name,
+                adjustments.amount_cents,
+                adjustments.reason,
+                links.snapshot_id AS weekly_snapshot_id,
+                adjustments.source_user_id,
+                adjustments.source_display_name,
+                adjustments.actor_user_id,
+                adjustments.actor_display_name,
+                adjustments.created_at,
+                adjustments.settled_at,
+                adjustments.settled_by_user_id,
+                adjustments.settled_by_display_name
+            FROM payout_adjustments adjustments
+            LEFT JOIN weekly_payout_snapshot_adjustments links
+              ON links.payout_adjustment_id = adjustments.id
+            ORDER BY adjustments.created_at ASC, adjustments.id ASC
             """
         ) as cursor:
             payout_adjustment_rows = await cursor.fetchall()
@@ -1065,6 +1513,7 @@ class Database:
                 "display_name": str(row["display_name"]),
                 "amount_cents": int(row["amount_cents"]),
                 "reason": str(row["reason"]),
+                "weekly_snapshot_id": row["weekly_snapshot_id"],
                 "source_user_id": row["source_user_id"],
                 "source_display_name": row["source_display_name"],
                 "actor_user_id": str(row["actor_user_id"]),
@@ -1119,6 +1568,9 @@ class Database:
             await self._connection.execute("DELETE FROM receipt_accounting")
             await self._connection.execute("DELETE FROM procurement_ledger")
             await self._connection.execute("DELETE FROM payout_adjustments")
+            await self._connection.execute("DELETE FROM weekly_payout_snapshot_adjustments")
+            await self._connection.execute("DELETE FROM weekly_payout_snapshot_receipts")
+            await self._connection.execute("DELETE FROM weekly_payout_snapshots")
             await self._connection.execute(
                 "DELETE FROM procurement_settings WHERE id = ?",
                 (PROCUREMENT_CUTOVER_ROW_ID,),
@@ -1348,6 +1800,12 @@ class Database:
         if audit.action == "procurement_ledger_entry":
             await self._restore_procurement_ledger_from_audit(audit)
             return True
+        if audit.action == "weekly_payout_snapshot":
+            await self._restore_weekly_payout_snapshot_from_audit(audit)
+            return True
+        if audit.action == "weekly_payout_snapshot_receipt":
+            await self._restore_weekly_payout_snapshot_receipt_from_audit(audit)
+            return True
         if audit.action == "payout_adjustment_snapshot":
             await self._restore_payout_adjustment_from_audit(audit)
             return True
@@ -1460,6 +1918,83 @@ class Database:
             ),
         )
 
+    async def _restore_weekly_payout_snapshot_from_audit(self, audit: AuditEvent) -> None:
+        detail = dict(audit.detail_json)
+        snapshot_id = detail.get("snapshot_id")
+        if snapshot_id is None:
+            return
+        async with self._connection.execute(
+            "SELECT 1 FROM weekly_payout_snapshots WHERE id = ?",
+            (int(snapshot_id),),
+        ) as cursor:
+            exists = await cursor.fetchone()
+        if exists is not None:
+            return
+        await self._connection.execute(
+            """
+            INSERT INTO weekly_payout_snapshots (
+                id,
+                week_key,
+                week_start_at,
+                week_end_at,
+                ranking_basis,
+                top_mech_user_id,
+                runner_up_user_id,
+                total_sales,
+                total_profit,
+                receipt_count,
+                actor_user_id,
+                actor_display_name,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(snapshot_id),
+                str(detail.get("week_key") or ""),
+                str(detail.get("week_start_at") or audit.created_at.isoformat()),
+                str(detail.get("week_end_at") or audit.created_at.isoformat()),
+                str(detail.get("ranking_basis") or "sales"),
+                detail.get("top_mech_user_id"),
+                detail.get("runner_up_user_id"),
+                int(detail.get("total_sales") or 0),
+                int(detail.get("total_profit") or 0),
+                int(detail.get("receipt_count") or 0),
+                str(detail.get("actor_user_id") or audit.actor_user_id),
+                str(detail.get("actor_display_name") or audit.actor_display_name),
+                str(detail.get("created_at") or audit.created_at.isoformat()),
+                str(detail.get("updated_at") or detail.get("created_at") or audit.created_at.isoformat()),
+            ),
+        )
+
+    async def _restore_weekly_payout_snapshot_receipt_from_audit(self, audit: AuditEvent) -> None:
+        detail = dict(audit.detail_json)
+        snapshot_id = detail.get("snapshot_id")
+        receipt_id = detail.get("receipt_id") or audit.target_receipt_id
+        if snapshot_id is None or receipt_id is None:
+            return
+        async with self._connection.execute(
+            """
+            SELECT 1
+            FROM weekly_payout_snapshot_receipts
+            WHERE snapshot_id = ?
+              AND receipt_id = ?
+            """,
+            (int(snapshot_id), str(receipt_id)),
+        ) as cursor:
+            exists = await cursor.fetchone()
+        if exists is not None:
+            return
+        await self._connection.execute(
+            """
+            INSERT INTO weekly_payout_snapshot_receipts (
+                snapshot_id,
+                receipt_id
+            ) VALUES (?, ?)
+            """,
+            (int(snapshot_id), str(receipt_id)),
+        )
+
     async def _restore_payout_adjustment_from_audit(self, audit: AuditEvent) -> None:
         detail = dict(audit.detail_json)
         adjustment_id = detail.get("adjustment_id")
@@ -1508,6 +2043,17 @@ class Database:
                 detail.get("settled_by_display_name"),
             ),
         )
+        weekly_snapshot_id = detail.get("weekly_snapshot_id")
+        if weekly_snapshot_id is not None:
+            await self._connection.execute(
+                """
+                INSERT OR IGNORE INTO weekly_payout_snapshot_adjustments (
+                    snapshot_id,
+                    payout_adjustment_id
+                ) VALUES (?, ?)
+                """,
+                (int(weekly_snapshot_id), int(adjustment_id)),
+            )
 
     async def _receipt_exists(self, receipt_id: str) -> bool:
         async with self._connection.execute(
@@ -1635,6 +2181,26 @@ class Database:
             pricing_source=PricingSource.from_db(str(row["pricing_source"])),
             line_sale_total=int(row["line_sale_total"]),
             line_cost_total=int(row["line_cost_total"]),
+        )
+
+    def _parse_weekly_snapshot(self, row: aiosqlite.Row) -> WeeklyPayoutSnapshot:
+        return WeeklyPayoutSnapshot(
+            id=int(row["id"]),
+            week_key=str(row["week_key"]),
+            week_start_at=parse_datetime(str(row["week_start_at"])),
+            week_end_at=parse_datetime(str(row["week_end_at"])),
+            ranking_basis=str(row["ranking_basis"]),
+            top_mech_user_id=str(row["top_mech_user_id"]) if row["top_mech_user_id"] is not None else None,
+            runner_up_user_id=(
+                str(row["runner_up_user_id"]) if row["runner_up_user_id"] is not None else None
+            ),
+            total_sales=int(row["total_sales"]),
+            total_profit=int(row["total_profit"]),
+            receipt_count=int(row["receipt_count"]),
+            actor_user_id=str(row["actor_user_id"]),
+            actor_display_name=str(row["actor_display_name"]),
+            created_at=parse_datetime(str(row["created_at"])),
+            updated_at=parse_datetime(str(row["updated_at"])),
         )
 
     def _parse_audit_event(self, row: aiosqlite.Row) -> AuditEvent:

@@ -231,6 +231,7 @@ def lifecycle_status_embed(state: str, description: str, *, channel_role: str = 
         field_value = (
             "`bm!manage` - open receipt manager\n"
             "`bm!payouts` - view payout totals\n"
+            "`bm!weeklypayout` - freeze weekly payout and award bonuses\n"
             "`bm!reset` - close out active receipts\n"
             "`bm!rebuildlogs` - rebuild log threads"
         )
@@ -424,6 +425,7 @@ def help_page_embed(prefix: str, page: int) -> EmbedPayload:
                 f"`{prefix}payouts` / `/mechpayouts` - Show staff payout totals\n"
                 f"`{prefix}payoutoffset` / `/mechpayoutoffset` - Add a payout-time credit or deduction\n"
                 f"`{prefix}payoutsplit` / `/mechpayoutsplit` - Split one user's payout across other staff\n"
+                f"`{prefix}weeklypayout` / `/mechweeklypayout` - Freeze the week and award Top Mech bonuses\n"
                 f"`{prefix}refresh` / `/mechrefresh` - Reload catalog and package files from disk\n"
                 f"`{prefix}templates [reload]` / `/mechtemplates [reload]` - Show live announcement commands or reload the templates JSON\n"
                 f"`{prefix}reset` / `/mechreset` - Backup active receipts, then mark them paid or invalidate them\n"
