@@ -39,6 +39,7 @@ from yt_assist.domain.models import (
     PricingSource,
     ReceiptAccountingRecord,
     ReceiptStatus,
+    StatsSort,
     utcnow,
 )
 from yt_assist.domain.packages import PackageExpansion, PackageSelection, append_unique_items, expand_package
@@ -83,6 +84,7 @@ from .render import (
     help_action_rows,
     help_page_embed,
     lifecycle_status_embed,
+    lifecycle_stats_embed,
     manage_page_parts,
     payouts_embed,
     receipt_detail_payload,
@@ -105,6 +107,7 @@ LOCAL_STOP_SIGNAL_FILE = "bakunawa-mech.stop"
 CALCULATOR_THREAD_PREFIX = "BM Calc - "
 RECEIPT_LOG_THREAD_PREFIX = "BM Logs - "
 MAINTENANCE_WRITE_DELAY_SECONDS = 0.35
+CLEAN_DELETE_DELAY_SECONDS = 0.85
 
 
 def _default_config_path(path: Path | None) -> Path:
@@ -1326,7 +1329,13 @@ class BakunawaMechDiscordClient(discord.Client):
             await _safe_delete_message(message)
 
         stats_message: discord.Message | None = None
-        if channel_role == "log":
+        if channel_role == "main":
+            entries = await self.base_runtime.database.leaderboard(StatsSort.SALES)
+            stats_message = await channel.send(
+                embed=embed_from_payload(lifecycle_stats_embed(entries)),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        elif channel_role == "log":
             entries = await self.base_runtime.database.payouts(None)
             stats_message = await channel.send(
                 embed=embed_from_payload(payouts_embed(entries)),
@@ -3770,6 +3779,7 @@ class BakunawaMechDiscordClient(discord.Client):
             try:
                 await existing.delete()
                 result.deleted += 1
+                await asyncio.sleep(CLEAN_DELETE_DELAY_SECONDS)
             except (discord.Forbidden, discord.HTTPException, discord.NotFound):
                 result.failed += 1
         return result
