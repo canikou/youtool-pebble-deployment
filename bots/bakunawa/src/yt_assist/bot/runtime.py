@@ -935,7 +935,7 @@ class BakunawaMechDiscordClient(discord.Client):
         if message.author.bot:
             return
 
-        channel_id = message.channel.id
+        channel_id = _configured_parent_channel_id(message.channel)
         if not self._is_scoped_messageable_channel(message.channel):
             return
         self._note_channel_activity(message)
@@ -1587,6 +1587,15 @@ class BakunawaMechDiscordClient(discord.Client):
             return
         self._track_task(_safe_delete_message_later(message, after_seconds))
 
+    async def _delete_component_message_if_allowed(
+        self,
+        interaction: discord.Interaction[Any],
+        message: discord.Message,
+    ) -> bool:
+        if self._is_zero_delete_channel(message.channel):
+            return True
+        return await _safe_delete_component_message(interaction, message)
+
     def _is_admin_user(self, user_id: int) -> bool:
         return user_id in self.base_runtime.config.discord.admin_user_ids
 
@@ -1605,21 +1614,12 @@ class BakunawaMechDiscordClient(discord.Client):
             [(item.item_name, item.quantity) for item in prefills],
             remainder,
         )
-        target_channel = await self._resolve_calculator_thread(message.channel, message.author)
-        if target_channel.id != message.channel.id:
-            referral = await message.channel.send(
-                f"<@{message.author.id}> I opened your Bakunawa Mech calculator in {target_channel.mention}."
-            )
-            self._track_task(
-                _safe_delete_message_later(
-                    referral,
-                    self.base_runtime.config.discord.transient_message_timeout_seconds,
-                )
-            )
+        target_user = await self._resolve_calc_target_user(message, target_user_id)
         await self._start_calc_session(
             actor=message.author,
-            channel=target_channel,
+            channel=message.channel,
             target_user_id=target_user_id,
+            target_user=target_user,
             prefilled_items=prefills,
             prefix_message=message,
         )
@@ -1919,10 +1919,12 @@ class BakunawaMechDiscordClient(discord.Client):
     async def _resolve_calculator_thread(
         self,
         channel: discord.abc.MessageableChannel,
-        actor: discord.abc.User,
+        user_id: int | str,
+        display_name: str,
     ) -> discord.abc.MessageableChannel:
+        user_id_text = str(user_id)
         if isinstance(channel, discord.Thread):
-            if _thread_matches_employee(channel, CALCULATOR_THREAD_PREFIX, actor.id):
+            if _thread_matches_employee(channel, CALCULATOR_THREAD_PREFIX, user_id_text):
                 await _ensure_thread_open(channel)
                 return channel
             parent = channel.parent
@@ -1930,16 +1932,16 @@ class BakunawaMechDiscordClient(discord.Client):
                 return await self._get_or_create_employee_thread(
                     parent,
                     CALCULATOR_THREAD_PREFIX,
-                    actor.id,
-                    getattr(actor, "display_name", actor.name),
+                    user_id_text,
+                    display_name,
                 )
             return channel
         if isinstance(channel, discord.TextChannel):
             return await self._get_or_create_employee_thread(
                 channel,
                 CALCULATOR_THREAD_PREFIX,
-                actor.id,
-                getattr(actor, "display_name", actor.name),
+                user_id_text,
+                display_name,
             )
         return channel
 
@@ -1994,11 +1996,12 @@ class BakunawaMechDiscordClient(discord.Client):
         channel: discord.abc.MessageableChannel,
         target_user_id: int | None,
         prefilled_items: list[DraftItem],
+        target_user: discord.abc.User | None = None,
         interaction: discord.Interaction[Any] | None = None,
         prefix_message: discord.Message | None = None,
     ) -> None:
         try:
-            credited = self._resolve_calc_credit_target(actor, target_user_id)
+            credited = self._resolve_calc_credit_target(actor, target_user_id, target_user)
         except ValueError as error:
             if interaction is not None:
                 await interaction.response.send_message(
@@ -2010,9 +2013,14 @@ class BakunawaMechDiscordClient(discord.Client):
                     embeds=[embed_from_payload(task_error_embed("Bakunawa Mech Access", str(error)))]
                 )
             return
+        target_channel = await self._resolve_calculator_thread(
+            channel,
+            credited.user_id,
+            credited.display_name,
+        )
         session = await self.base_runtime.bot_state.upsert_session_with_credit(
             actor.id,
-            channel.id,
+            target_channel.id,
             credited,
         )
         if prefilled_items:
@@ -2041,17 +2049,25 @@ class BakunawaMechDiscordClient(discord.Client):
 
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
-            channel_object=channel,
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(target_channel)),
+            channel_object=target_channel,
             is_interaction=interaction is not None,
             invocation_message=prefix_message,
-            interaction=interaction if interaction is None or interaction.channel_id == channel.id else None,
+            interaction=interaction if interaction is None or interaction.channel_id == target_channel.id else None,
         )
         await self._send_reply(dispatch, payload)
-        if interaction is not None and interaction.channel_id != channel.id:
+        if interaction is not None and interaction.channel_id != target_channel.id:
             await interaction.response.send_message(
-                f"I opened your Bakunawa Mech calculator in {channel.mention}.",
+                f"I opened your Bakunawa Mech calculator in {target_channel.mention}.",
                 ephemeral=True,
+            )
+        if prefix_message is not None and target_channel.id != prefix_message.channel.id:
+            referral = await prefix_message.channel.send(
+                f"<@{actor.id}> I opened your Bakunawa Mech calculator in {target_channel.mention}."
+            )
+            self._schedule_delete_message_if_allowed(
+                referral,
+                self.base_runtime.config.discord.transient_message_timeout_seconds,
             )
         if dispatch.reply_message is not None:
             await self.base_runtime.bot_state.set_panel_message(
@@ -2066,6 +2082,7 @@ class BakunawaMechDiscordClient(discord.Client):
         self,
         actor: discord.abc.User,
         target_user_id: int | None,
+        target_user: discord.abc.User | None = None,
     ) -> SessionCreditTarget:
         if target_user_id is None or target_user_id == actor.id:
             return SessionCreditTarget(
@@ -2075,7 +2092,39 @@ class BakunawaMechDiscordClient(discord.Client):
             )
         if not self._is_admin_user(actor.id):
             raise ValueError("Only admins can credit a receipt to another user.")
+        if target_user is not None and target_user.id == target_user_id:
+            return SessionCreditTarget(
+                user_id=str(target_user.id),
+                username=target_user.name,
+                display_name=getattr(
+                    target_user,
+                    "display_name",
+                    getattr(target_user, "global_name", target_user.name),
+                ),
+            )
         return SessionCreditTarget.from_user_id(target_user_id)
+
+    async def _resolve_calc_target_user(
+        self,
+        message: discord.Message,
+        target_user_id: int | None,
+    ) -> discord.abc.User | None:
+        if target_user_id is None:
+            return None
+        for user in message.mentions:
+            if user.id == target_user_id:
+                return user
+        if message.guild is not None:
+            member = message.guild.get_member(target_user_id)
+            if member is not None:
+                return member
+        cached = self.get_user(target_user_id)
+        if cached is not None:
+            return cached
+        try:
+            return await self.fetch_user(target_user_id)
+        except discord.HTTPException:
+            return None
 
     async def _preload_calc_proof_from_message(
         self,
@@ -2180,7 +2229,7 @@ class BakunawaMechDiscordClient(discord.Client):
                                 embeds=[embed_from_payload(calc_completed_embed(receipt_id))],
                                 view=None,
                             )
-                        self._track_task(_safe_delete_message_later(panel_message, 10))
+                        self._schedule_delete_message_if_allowed(panel_message, 10)
             return True
         except Exception:
             await self.base_runtime.bot_state.restore_after_finalize_failure(
@@ -2379,7 +2428,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     view=None,
                 )
                 if interaction.message is not None:
-                    self._track_task(_safe_delete_message_later(interaction.message, 10))
+                    self._schedule_delete_message_if_allowed(interaction.message, 10)
                 return
             await self._edit_calc_panel(interaction, next_session)
             return
@@ -2403,7 +2452,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 await interaction.response.defer()
             deleted = False
             if interaction.message is not None:
-                deleted = await _safe_delete_component_message(interaction, interaction.message)
+                deleted = await self._delete_component_message_if_allowed(interaction, interaction.message)
             elif session is not None and session.panel_channel_id is not None and session.panel_message_id is not None:
                 panel_channel = self.get_channel(session.panel_channel_id)
                 if panel_channel is not None:
@@ -2412,7 +2461,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     except (discord.HTTPException, discord.NotFound, AttributeError):
                         panel_message = None
                     if panel_message is not None:
-                        deleted = await _safe_delete_component_message(interaction, panel_message)
+                        deleted = await self._delete_component_message_if_allowed(interaction, panel_message)
             if not deleted:
                 await _safe_interaction_warning(
                     interaction,
@@ -2511,7 +2560,7 @@ class BakunawaMechDiscordClient(discord.Client):
                         view=None,
                     )
                 if original is not None:
-                    self._track_task(_safe_delete_message_later(original, 10))
+                    self._schedule_delete_message_if_allowed(original, 10)
                 return
             try:
                 waiting = await self.base_runtime.bot_state.mark_waiting_for_proof(owner_id)
@@ -2957,7 +3006,7 @@ class BakunawaMechDiscordClient(discord.Client):
         payload = ReplyPayload(embeds=[embed], components=rows, ephemeral=interaction is not None)
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             channel_object=channel,
             is_interaction=interaction is not None,
             interaction=interaction,
@@ -2978,7 +3027,7 @@ class BakunawaMechDiscordClient(discord.Client):
         )
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             channel_object=channel,
             is_interaction=interaction is not None,
             interaction=interaction,
@@ -3004,7 +3053,7 @@ class BakunawaMechDiscordClient(discord.Client):
     ) -> None:
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             channel_object=channel,
             is_interaction=interaction is not None,
             interaction=interaction,
@@ -3066,7 +3115,7 @@ class BakunawaMechDiscordClient(discord.Client):
         )
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             channel_object=channel,
             is_interaction=interaction is not None,
             interaction=interaction,
@@ -3081,7 +3130,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     prompt_message=dispatch.reply_message,
                     status_override=status_override,
                 )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
     async def _start_import_from_file(
@@ -3132,7 +3181,7 @@ class BakunawaMechDiscordClient(discord.Client):
             attachment_filename=source_path.name,
             delete_after_use=False,
         )
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
     async def _stage_import_review(
@@ -3273,14 +3322,14 @@ class BakunawaMechDiscordClient(discord.Client):
         )
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, invocation_channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(invocation_channel)),
             channel_object=invocation_channel,
             is_interaction=interaction is not None,
             interaction=interaction,
             invocation_message=prefix_message,
         )
         await self._send_reply(dispatch, progress_payload)
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
         scan_channel = self.get_channel(scan_channel_id)
@@ -3373,9 +3422,14 @@ class BakunawaMechDiscordClient(discord.Client):
                 self._pending_rescans[actor.id] = remaining
             else:
                 self._pending_rescans.pop(actor.id, None)
+        calc_channel = await self._resolve_calculator_thread(
+            invocation_channel,
+            first_candidate.credited.user_id,
+            first_candidate.credited.display_name,
+        )
         session = await self.base_runtime.bot_state.upsert_session_with_credit(
             actor.id,
-            invocation_channel.id,
+            calc_channel.id,
             first_candidate.credited,
         )
         session.workflow_notice = first_candidate.workflow_notice
@@ -3397,12 +3451,17 @@ class BakunawaMechDiscordClient(discord.Client):
 
         calc_dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, invocation_channel.id),
-            channel_object=invocation_channel,
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(calc_channel)),
+            channel_object=calc_channel,
             is_interaction=interaction is not None,
-            interaction=interaction,
+            interaction=interaction if interaction is None or interaction.channel_id == calc_channel.id else None,
         )
         await self._send_reply(calc_dispatch, calc_reply_payload(self.base_runtime.catalog.items, session))
+        if interaction is not None and interaction.channel_id != calc_channel.id:
+            await interaction.followup.send(
+                f"I opened the first rescan calculator in {calc_channel.mention}.",
+                ephemeral=True,
+            )
         if calc_dispatch.reply_message is not None:
             await self.base_runtime.bot_state.set_panel_message(
                 actor.id,
@@ -3510,14 +3569,14 @@ class BakunawaMechDiscordClient(discord.Client):
         )
         dispatch = DiscordDispatchContext(
             actor=_actor_from_user(actor),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             channel_object=channel,
             is_interaction=interaction is not None,
             interaction=interaction,
             invocation_message=prefix_message,
         )
         await self._send_reply(dispatch, progress_payload)
-        if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
         receipts = await self.base_runtime.database.list_all_receipts()
@@ -3639,7 +3698,7 @@ class BakunawaMechDiscordClient(discord.Client):
             invocation_message=prefix_message,
         )
         await self._send_reply(dispatch, progress_payload)
-        if prefix_message is not None and not self._is_admin_channel_id(_configured_parent_channel_id(prefix_message.channel)):
+        if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
             await _safe_delete_message(prefix_message)
 
         receipts = await self.base_runtime.database.list_all_receipts()
@@ -3949,7 +4008,7 @@ class BakunawaMechDiscordClient(discord.Client):
                     )
                 ]
             )
-            if prefix_message is not None and not self._is_admin_channel_id(prefix_message.channel.id):
+            if prefix_message is not None and not self._is_admin_messageable_channel(prefix_message.channel):
                 await _safe_delete_message(prefix_message)
         await self._announce_shutdown_status(
             restart=restart,
@@ -4674,7 +4733,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 view=None,
             )
             raise
-        await _safe_delete_message(message)
+        await self._delete_message_if_allowed(message)
         if updated:
             refreshed_receipt = await self.base_runtime.database.get_receipt(pending.receipt_id)
             if refreshed_receipt is not None:
@@ -4910,11 +4969,9 @@ class BakunawaMechDiscordClient(discord.Client):
                 content=f"<@{session.user_id}> calculator closed after 20 minutes of inactivity.",
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
-            self._track_task(
-                _safe_delete_message_later(
-                    closure,
-                    self.base_runtime.config.discord.transient_message_timeout_seconds,
-                )
+            self._schedule_delete_message_if_allowed(
+                closure,
+                self.base_runtime.config.discord.transient_message_timeout_seconds,
             )
 
     async def _panel_message_for_session(self, session: CalculatorSession) -> discord.Message | None:
@@ -4955,13 +5012,15 @@ class BakunawaMechDiscordClient(discord.Client):
                 for user_id, _ in expired:
                     self._pending_help_panels.pop(user_id, None)
             for _, panel in expired:
-                await _safe_delete_message(panel.prompt_message)
+                await self._delete_message_if_allowed(panel.prompt_message)
 
     async def _maybe_remember_help_panel(
         self,
         reply_message: discord.Message,
         payload: ReplyPayload,
     ) -> None:
+        if self._is_zero_delete_channel(reply_message.channel):
+            return
         if not payload.components:
             return
         first_row = payload.components[0]
@@ -4981,7 +5040,7 @@ class BakunawaMechDiscordClient(discord.Client):
                 expires_at=utcnow() + _seconds_delta(self.base_runtime.config.discord.transient_message_timeout_seconds),
             )
         if previous is not None and previous.prompt_message.id != reply_message.id:
-            await _safe_delete_message(previous.prompt_message)
+            await self._delete_message_if_allowed(previous.prompt_message)
 
     async def _receipt_detail_reply(
         self,
@@ -5257,7 +5316,7 @@ class BakunawaMechDiscordClient(discord.Client):
         ctx = CommandContext(
             runtime=self.shared_runtime,
             actor=_actor_from_user(interaction.user),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             is_interaction=True,
             raw_input=custom_id,
         )
@@ -5463,12 +5522,12 @@ class BakunawaMechDiscordClient(discord.Client):
                 )
                 return
             prefilled_items = parse_calc_prefix_input(self.base_runtime.catalog, items or "")[1]
-            target_channel = await self._resolve_calculator_thread(channel, interaction.user)
             await self._start_calc_session(
                 actor=interaction.user,
-                channel=target_channel,
+                channel=channel,
                 target_user_id=user.id if user is not None else None,
                 prefilled_items=prefilled_items,
+                target_user=user,
                 interaction=interaction,
             )
 
@@ -5993,7 +6052,7 @@ class BakunawaMechDiscordClient(discord.Client):
         ctx = CommandContext(
             runtime=self.shared_runtime,
             actor=_actor_from_user(interaction.user),
-            channel=_channel_from_id(self.base_runtime, channel.id),
+            channel=_channel_from_id(self.base_runtime, _configured_parent_channel_id(channel)),
             is_interaction=True,
             raw_input=input_text,
         )

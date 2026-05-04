@@ -185,6 +185,8 @@ def _cleanup_prefix_invocation_events(ctx: CommandContext) -> list[CommandEvent]
 
 
 def _schedule_transient_cleanup_events(ctx: CommandContext) -> list[CommandEvent]:
+    if ctx.is_admin_channel():
+        return []
     timeout = ctx.runtime.config.discord.transient_message_timeout_seconds
     events = [_schedule_delete("reply", timeout)]
     if not ctx.is_interaction and not ctx.is_admin_channel():
@@ -241,9 +243,10 @@ async def _handle_help(ctx: CommandContext, args: list[str]) -> CommandResult:
         ephemeral=ctx.is_interaction,
     )
     result = CommandResult(canonical_name="help", events=[_send(reply)])
-    result.events.append(
-        _schedule_delete("reply", ctx.runtime.config.discord.transient_message_timeout_seconds)
-    )
+    if not ctx.is_admin_channel():
+        result.events.append(
+            _schedule_delete("reply", ctx.runtime.config.discord.transient_message_timeout_seconds)
+        )
     if not ctx.is_interaction and not ctx.is_admin_channel():
         result.events.append(
             _schedule_delete("invocation", ctx.runtime.config.discord.transient_message_timeout_seconds)
@@ -897,9 +900,12 @@ def _parse_input(ctx: CommandContext, input_text: str) -> tuple[str, list[str]] 
                         ]
                     )
                 ),
-                _schedule_delete("reply", ctx.runtime.config.discord.transient_message_timeout_seconds),
             ],
         )
+        if not ctx.is_admin_channel():
+            result.events.append(
+                _schedule_delete("reply", ctx.runtime.config.discord.transient_message_timeout_seconds)
+            )
         if not ctx.is_admin_channel():
             result.events.append(
                 _schedule_delete(
