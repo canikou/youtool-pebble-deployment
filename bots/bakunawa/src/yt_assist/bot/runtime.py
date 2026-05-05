@@ -6551,10 +6551,71 @@ def _package_option_description(package_key: str) -> str:
     return descriptions.get(package_key, "Package")
 
 
+_PACKAGE_CHOICE_KEY_ALIASES = {
+    "drift": "d",
+    "tire": "t",
+    "drivetrain": "w",
+    "engine": "e",
+    "maintenance_type": "m",
+}
+_PACKAGE_CHOICE_KEY_BY_ALIAS = {value: key for key, value in _PACKAGE_CHOICE_KEY_ALIASES.items()}
+
+_PACKAGE_CHOICE_VALUE_ALIASES = {
+    "drift": {
+        "drift": "d",
+        "no_drift": "n",
+    },
+    "tire": {
+        "no_tires": "n",
+        "slick": "s",
+        "semi_slick": "m",
+        "off_road": "o",
+    },
+    "drivetrain": {
+        "awd": "a",
+        "fwd": "f",
+        "rwd": "r",
+    },
+    "engine": {
+        "i4": "4",
+        "v6": "6",
+        "v8": "8",
+        "v12": "12",
+    },
+    "maintenance_type": {
+        "standard": "s",
+        "ev": "e",
+    },
+}
+_PACKAGE_CHOICE_VALUE_BY_ALIAS = {
+    group: {alias: value for value, alias in aliases.items()}
+    for group, aliases in _PACKAGE_CHOICE_VALUE_ALIASES.items()
+}
+
+
+def _encode_package_choice_key(key: str) -> str:
+    return _PACKAGE_CHOICE_KEY_ALIASES.get(key, key)
+
+
+def _decode_package_choice_key(key: str) -> str:
+    return _PACKAGE_CHOICE_KEY_BY_ALIAS.get(key, key)
+
+
+def _encode_package_choice_value(key: str, value: str) -> str:
+    return _PACKAGE_CHOICE_VALUE_ALIASES.get(key, {}).get(value, value)
+
+
+def _decode_package_choice_value(key: str, value: str) -> str:
+    return _PACKAGE_CHOICE_VALUE_BY_ALIAS.get(key, {}).get(value, value)
+
+
 def _encode_package_choices(choices: dict[str, str]) -> str:
     if not choices:
         return "-"
-    return ",".join(f"{key}={value}" for key, value in sorted(choices.items()))
+    return ",".join(
+        f"{_encode_package_choice_key(key)}={_encode_package_choice_value(key, value)}"
+        for key, value in sorted(choices.items())
+    )
 
 
 def _decode_package_choices(encoded: str) -> dict[str, str]:
@@ -6565,14 +6626,17 @@ def _decode_package_choices(encoded: str) -> dict[str, str]:
         if not part or "=" not in part:
             continue
         key, value = part.split("=", 1)
-        choices[key] = value
+        decoded_key = _decode_package_choice_key(key)
+        choices[decoded_key] = _decode_package_choice_value(decoded_key, value)
     return choices
 
 
 def _encode_package_counts(counts: dict[str, int]) -> str:
     if not counts:
         return "-"
-    return ",".join(f"{key}={value}" for key, value in sorted(counts.items()))
+    return ",".join(
+        f"{_encode_package_choice_key(key)}={value}" for key, value in sorted(counts.items())
+    )
 
 
 def _decode_package_counts(encoded: str) -> dict[str, int]:
@@ -6584,7 +6648,7 @@ def _decode_package_counts(encoded: str) -> dict[str, int]:
             continue
         key, value = part.split("=", 1)
         try:
-            counts[key] = int(value)
+            counts[_decode_package_choice_key(key)] = int(value)
         except ValueError:
             continue
     return counts
